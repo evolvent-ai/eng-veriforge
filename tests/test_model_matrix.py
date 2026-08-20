@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "templates" / "runner" / "run_task.py"
 WRAPPER_PATH = ROOT / "templates" / "runner" / "run_benchmark.sh"
 MATRIX_PATH = ROOT / "examples" / "activity-models.yaml"
+HARNESSES_PATH = ROOT / "templates" / "runner" / "harnesses.yaml"
 
 
 def load_runner():
@@ -51,6 +52,27 @@ class CanonicalMatrixTests(unittest.TestCase):
             loaded = RUNNER.load_catalog(path)
         self.assertEqual({model["id"] for model in loaded["models"]}, RUNNER.CANONICAL_MODEL_IDS)
 
+    def test_wodex_harness_matrix_is_accepted(self):
+        catalog = RUNNER.load_harness_catalog(HARNESSES_PATH)
+        self.assertEqual({entry["id"] for entry in catalog["harnesses"]}, {"cc", "codex"})
+        self.assertEqual(catalog["credential_env"], "WODEX_API_KEY")
+
+    def test_harness_selection_never_prefers_provider_adapter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "package"
+            (package / "03-runner").mkdir(parents=True)
+            (package / "03-runner" / "provider_agent.py").write_text("", encoding="utf-8")
+            (package / "03-runner" / "cc_agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            (package / "03-runner" / "codex_agent.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            self.assertEqual(
+                RUNNER.resolve_agent_command(package, None, "cc"),
+                [str(package / "03-runner" / "cc_agent.sh")],
+            )
+            self.assertEqual(
+                RUNNER.resolve_agent_command(package, None, "codex"),
+                [str(package / "03-runner" / "codex_agent.sh")],
+            )
+
     def test_participant_wrapper_is_executable_and_cwd_independent(self):
         self.assertTrue(os.access(WRAPPER_PATH, os.X_OK))
         with tempfile.TemporaryDirectory() as temp:
@@ -68,7 +90,7 @@ class CanonicalMatrixTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(completed.returncode, 2)
-        self.assertIn("1. 选择一个模型", completed.stdout)
+        self.assertIn("1. 选择 harness", completed.stdout)
         self.assertIn("--rolls must be between", completed.stderr)
 
     def test_default_results_directory_names_model_and_timestamp(self):
@@ -159,14 +181,15 @@ class CanonicalMatrixTests(unittest.TestCase):
         selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
         profile = selected["profiles"][0]
         child_env = RUNNER.build_environment(selected, profile, "runtime-secret", Path("task.yaml"))
-        self.assertEqual(child_env["OPENAI_API_KEY"], "runtime-secret")
+        self.assertEqual(child_env["WODEX_API_KEY"], "runtime-secret")
         self.assertEqual(
             json.loads(child_env["VERIFORGE_NATIVE_PARAMETERS_JSON"]),
             {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
         )
-        for model in self.matrix["models"]:
-            if model is not selected:
-                self.assertNotIn(model["credential_env"], child_env)
+        self.assertEqual(
+            {key for key in child_env if key.endswith("_API_KEY")},
+            {"WODEX_API_KEY"},
+        )
 
     def test_provider_adapters_translate_canonical_parameters(self):
         expected = {
@@ -197,7 +220,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             (source / "03-runner" / "provider_agent.py").write_text(
                 "import os; from pathlib import Path; "
                 "seen=Path('marker.txt').exists(); "
-                "print(f'marker-existed={seen} key={os.environ.get(\"OPENAI_API_KEY\")}'); "
+                "print(f'marker-existed={seen} key={os.environ.get(\"WODEX_API_KEY\")}'); "
                 "Path('marker.txt').write_text('created', encoding='utf-8')\n",
                 encoding="utf-8",
             )
@@ -282,6 +305,9 @@ class CanonicalMatrixTests(unittest.TestCase):
             (source / "01-task").mkdir(parents=True)
             (source / "03-runner").mkdir()
             (source / "03-runner" / "provider_agent.py").write_text("", encoding="utf-8")
+            shutil.copy2(HARNESSES_PATH, source / "03-runner" / "harnesses.yaml")
+            shutil.copy2(ROOT / "templates" / "runner" / "codex_agent.sh", source / "03-runner" / "codex_agent.sh")
+            shutil.copy2(ROOT / "templates" / "runner" / "cc_agent.sh", source / "03-runner" / "cc_agent.sh")
             (source / "02-evaluation").mkdir()
             (source / "02-evaluation" / "scorer.py").write_text("", encoding="utf-8")
             task_spec = source / "01-task" / "task.yaml"
@@ -292,7 +318,9 @@ class CanonicalMatrixTests(unittest.TestCase):
             try:
                 sys.argv = [
                     str(RUNNER_PATH),
-                    "--model",
+                "--harness",
+                "codex",
+                "--model",
                     "gpt-5.6-sol",
                     "--rolls",
                     "2",

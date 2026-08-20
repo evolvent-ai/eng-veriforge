@@ -10,9 +10,10 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 ./03-runner/run_benchmark.sh
 ```
 
-脚本会依次让参赛者选择一个模型、隐藏输入该模型的 API Key，然后默认自动
-执行 3 次 rollout 和评分。每次运行使用新的 `results/<model>-<timestamp>/`
-目录，不需要配置 provider、adapter、scorer、workspace 或输出路径。
+脚本会依次让参赛者选择 harness（Claude Code 或 Codex）、选择模型、隐藏输入
+Wodex API Key，然后默认自动执行 3 次隔离 rollout 和评分。每次运行使用新的
+`results/<model>-<timestamp>/` 目录，不需要配置 provider、adapter、scorer、
+workspace 或输出路径。
 
 ## 三类产物
 
@@ -20,8 +21,8 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 2. 评测资产：标答、fixture、rubric、验证器和评分器。
 3. 执行脚本：隔离 harness、Agent 调用、固定模型/超参、评分和 `N` 次 roll 聚合。
 
-生成的 participant 包必须同时包含 task-specific provider adapter、
-deterministic scorer 和 isolation manifest；参赛者不需要配置这些内部组件。
+生成的 participant 包必须同时包含 CC/Codex harness adapter、deterministic
+scorer 和 isolation manifest；参赛者不需要配置这些内部组件。
 
 skill 生成的每个任务包都直接是可运行的 `status: verified` 包。状态是固定
 的包元数据，不是参赛者或主办方需要流转的流程；rollout 分数和执行结果是
@@ -35,7 +36,7 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 - 运行前只读检查 MCP、CLI、路径和环境变量。
 - 只有用户确认且检查通过的能力才进入 harness allowlist。
 - API Key 只在运行时注入，不写入任务包或日志。
-- 当前版本本地优先，不包含云端 ZIP 上传、Harbor 调度或凭据托管。
+- 当前版本使用主办方 Wodex gateway，不包含云端 ZIP 上传、Harbor 调度或凭据托管。
 
 详细契约见 `references/task-contract.md`。
 
@@ -49,26 +50,27 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 上限统一为 `32768`。runner 会拒绝缺失/额外/未知模型、额外 profile、参数
 不完整、provider 映射不一致或仍含 `REPLACE_WITH_*` 的配置。
 
-参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，只能
-从这五个已批准模型中选择一个，在运行时输入所选模型的 API Key，并选择
-rollout 次数。固定使用 `per_selected_model`：每次只输入和注入当前选中模型
-对应的一个 Key；其他四个模型的 Key 缺失不应阻止当前运行。
+参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，先选择
+CC 或 Codex，再从这五个已批准模型中选择一个，在运行时输入唯一的
+`WODEX_API_KEY`，并选择 rollout 次数。
 
 默认能力基线建议只包含：
 
-- Codex CLI adapter；
-- Claude Code（CC）CLI adapter，具体命令名和版本由主办方确认；
+- Codex CLI harness；
+- Claude Code（CC）CLI harness（可用 `CLAUDE_BIN` 指定路径）；
 - Python 3 和 PyYAML 作为 runner 依赖。
 
-默认不启用 MCP、额外 Skill、浏览器、外部应用或网络。CC/Codex 是执行
-adapter 的 CLI 能力，不是 `models.yaml` 中可以由参赛者自由添加的 provider。
+默认不启用 MCP、额外 Skill、浏览器、外部应用或额外网络。CC/Codex 是执行
+harness，不是 `models.yaml` 中可以由参赛者自由添加的 provider；五个模型都
+通过 Wodex。
 只有完成 `--version`/`--help` 等只读检查并经主办方确认的 CLI，才能写入
 `harness.allowlist.yaml`。
 
 ## 参赛者模型选择
 
-活动包在 `03-runner/models.yaml` 中声明五个允许模型和固定超参。参赛者每次
-只选择一个模型和 rollout 次数，runner 自动使用该模型唯一的 `default`
+活动包在 `03-runner/harnesses.yaml` 和 `03-runner/models.yaml` 中声明两个
+harness、五个允许模型和固定超参。参赛者每次先选择 harness，再选择一个
+模型和 rollout 次数，runner 自动使用该模型唯一的 `default`
 profile。使用 `veriforge-model-matrix/v2` 时，runner 支持交互式选择：
 
 ```bash
@@ -85,11 +87,12 @@ CI 或高级调用也可以显式指定模型：
 
 ```bash
 python 03-runner/run_task.py \
+  --harness codex \
   --model gpt-5.6-sol \
   --rolls 3
 ```
 
-任务如果提供 Agent adapter，可以直接传入命令；下面两种分隔符写法等价：
+开发调试时如果提供自定义 Agent adapter，可以直接传入命令；下面两种分隔符写法等价：
 
 ```bash
 python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
@@ -97,19 +100,20 @@ python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-
 ```
 
 runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 profile 中的
-`timeout_seconds` 限制单次 Agent 运行。API Key 仍只在运行时隐藏输入或从
+`timeout_seconds` 限制单次 Agent 运行。Wodex API Key 仍只在运行时隐藏输入或从
 环境变量读取，绝不会写入配置、manifest 或错误日志。Agent adapter 必须
 传播非零退出码，并保留经过脱敏的有限 stdout/stderr 诊断，不能把失败
-重定向到 `/dev/null`。如果 Codex 使用非默认 provider，可在 `models.yaml`
-中声明非敏感的 `codex_model_provider` 和 `codex_base_url`，由 adapter 注入
-临时配置，不能加载参与者的全局 Codex 配置。
+重定向到 `/dev/null`。Codex harness 会为每个 roll 注入临时 Wodex provider
+配置，不能加载参与者的全局 Codex 配置；CC harness 使用 Wodex 的 Anthropic
+兼容环境变量。
 
 每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
 Agent 的 cwd；`outputs`、stdout/stderr 日志、scorer result、HOME、配置和
 缓存目录也都按 roll 分开。前一个 roll 在 workspace 中创建或修改的文件
-不会进入后一个 roll。runner 会自动发现生成包中的
-`03-runner/provider_agent.py` 和 `02-evaluation/scorer.py`，参赛者不需要
-传入 adapter 或 scorer 命令。`--workspace-source`、`--scorer-command` 和
+不会进入后一个 roll。runner 会按选择自动调用
+`03-runner/cc_agent.sh` 或 `03-runner/codex_agent.sh`，并发现
+`02-evaluation/scorer.py`，参赛者不需要传入 adapter 或 scorer 命令。
+`--workspace-source`、`--scorer-command` 和
 `--agent-command` 仅作为开发调试 override，并通过
 `VERIFORGE_SCORER_RESULT` 指向当前 roll 的结果路径。
 

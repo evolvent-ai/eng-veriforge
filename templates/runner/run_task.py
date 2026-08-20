@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Participant runner for one allowlisted model and N rollout attempts.
-
-Generated task runners should replace ``invoke_agent`` with their harness
-adapter, or pass an agent command with ``--agent-command``.
-"""
+"""Participant runner for one Wodex model and N isolated harness rollouts."""
 
 from __future__ import annotations
 
@@ -27,54 +23,71 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.8"
+RUNNER_VERSION = "veriforge-runner/v2.0"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
 ISOLATION_MANIFEST_VERSION = "veriforge-isolation-manifest/v1"
 CANONICAL_MODELS = {
     "kimi-k3": {
-        "provider": "moonshot",
+        "provider": "wodex",
         "adapter": "openai_chat",
         "model_name": "kimi-k3",
         "endpoint": "chat_completions",
-        "base_url": "https://api.moonshot.ai/v1",
-        "credential_env": "MOONSHOT_API_KEY",
+        "base_url": "https://api.wodex.ai/v1",
+        "credential_env": "WODEX_API_KEY",
     },
     "deepseek-v4-pro": {
-        "provider": "deepseek",
+        "provider": "wodex",
         "adapter": "openai_chat",
         "model_name": "deepseek-v4-pro",
         "endpoint": "chat_completions",
-        "base_url": "https://api.deepseek.com",
-        "credential_env": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.wodex.ai/v1",
+        "credential_env": "WODEX_API_KEY",
     },
     "qwen3.8-max": {
-        "provider": "qwen",
+        "provider": "wodex",
         "adapter": "openai_chat",
         "model_name": "qwen3.8-max",
         "endpoint": "chat_completions",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "credential_env": "DASHSCOPE_API_KEY",
+        "base_url": "https://api.wodex.ai/v1",
+        "credential_env": "WODEX_API_KEY",
     },
     "claude-opus-5": {
-        "provider": "anthropic",
+        "provider": "wodex",
         "adapter": "anthropic_messages",
         "model_name": "claude-opus-5",
         "endpoint": "messages",
-        "base_url": "https://api.anthropic.com",
-        "credential_env": "ANTHROPIC_API_KEY",
+        "base_url": "https://api.wodex.ai",
+        "credential_env": "WODEX_API_KEY",
     },
     "gpt-5.6-sol": {
-        "provider": "openai",
+        "provider": "wodex",
         "adapter": "openai_responses",
         "model_name": "gpt-5.6-sol",
         "endpoint": "responses",
-        "base_url": "https://api.openai.com/v1",
-        "credential_env": "OPENAI_API_KEY",
+        "base_url": "https://api.wodex.ai/v1",
+        "credential_env": "WODEX_API_KEY",
     },
 }
 CANONICAL_MODEL_IDS = frozenset(CANONICAL_MODELS)
+CANONICAL_HARNESSES = {
+    "cc": {
+        "display_name": "Claude Code (CC)",
+        "executable": "claude",
+        "executable_env": "CLAUDE_BIN",
+        "protocol": "anthropic",
+        "base_url": "https://api.wodex.ai",
+    },
+    "codex": {
+        "display_name": "Codex CLI",
+        "executable": "codex",
+        "executable_env": "CODEX_BIN",
+        "protocol": "openai_responses",
+        "base_url": "https://api.wodex.ai/v1",
+    },
+}
+CANONICAL_HARNESS_IDS = frozenset(CANONICAL_HARNESSES)
 
 
 def _openai_responses_parameters(parameters: dict) -> dict:
@@ -175,7 +188,6 @@ def load_catalog(path: Path) -> dict:
         raise ValueError("organizer_controls.approved_model_ids must be the five canonical IDs")
 
     seen_models: set[str] = set()
-    seen_credentials: set[str] = set()
     for model in models:
         if not isinstance(model, dict):
             raise ValueError("each model must be a mapping")
@@ -192,10 +204,6 @@ def load_catalog(path: Path) -> dict:
                 raise ValueError(f"model {model_id}.{field} must equal the canonical matrix value")
             if isinstance(value, str) and PLACEHOLDER_MARKER in value:
                 raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
-        credential_env = canonical["credential_env"]
-        if credential_env in seen_credentials:
-            raise ValueError(f"credential_env must be unique: {credential_env}")
-        seen_credentials.add(credential_env)
         profiles = model.get("profiles")
         if not isinstance(profiles, list) or len(profiles) != 1:
             raise ValueError(f"model {model_id} must declare exactly one profile")
@@ -207,6 +215,38 @@ def load_catalog(path: Path) -> dict:
     if seen_models != CANONICAL_MODEL_IDS:
         raise ValueError("models.yaml must contain exactly the five canonical model IDs")
 
+    return catalog
+
+
+def load_harness_catalog(path: Path) -> dict:
+    """Validate the two organizer-approved participant harnesses."""
+    try:
+        catalog = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"harnesses file not found: {path}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML in {path}: {exc}") from exc
+    if not isinstance(catalog, dict) or catalog.get("schema_version") != "veriforge-harness-matrix/v1":
+        raise ValueError("harnesses.yaml must use veriforge-harness-matrix/v1")
+    if catalog.get("credential_env") != "WODEX_API_KEY":
+        raise ValueError("harnesses.yaml must use WODEX_API_KEY")
+    entries = catalog.get("harnesses")
+    if not isinstance(entries, list) or len(entries) != len(CANONICAL_HARNESSES):
+        raise ValueError("harnesses.yaml must contain exactly cc and codex")
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("id") not in CANONICAL_HARNESS_IDS:
+            raise ValueError("harnesses.yaml contains an unapproved harness")
+        harness_id = entry["id"]
+        if harness_id in seen:
+            raise ValueError(f"duplicate harness id: {harness_id}")
+        seen.add(harness_id)
+        canonical = CANONICAL_HARNESSES[harness_id]
+        for field, expected in canonical.items():
+            if entry.get(field) != expected:
+                raise ValueError(f"harness {harness_id}.{field} must equal the Wodex harness mapping")
+    if seen != CANONICAL_HARNESS_IDS:
+        raise ValueError("harnesses.yaml must contain exactly cc and codex")
     return catalog
 
 
@@ -276,25 +316,36 @@ def fixture_hashes(workspace: Path, manifest: dict) -> dict[str, str]:
     return hashes
 
 
-def resolve_agent_command(workspace: Path, explicit: list[str] | None) -> list[str]:
-    """Use the generated task adapter by default; explicit commands are for debugging."""
+def resolve_agent_command(
+    workspace: Path,
+    explicit: list[str] | None,
+    harness_id: str | None = None,
+) -> list[str]:
+    """Resolve the selected real harness; keep provider_agent as legacy fallback."""
     if explicit:
         return explicit
-    candidates = (
-        workspace / "03-runner" / "provider_agent.py",
-        workspace / "03-runner" / "agent_adapter.py",
-        workspace / "03-runner" / "codex_agent.sh",
-        workspace / "03-runner" / "cc_agent.sh",
-        workspace / "03-runner" / "agent.sh",
-    )
+    if harness_id == "cc":
+        candidates = (workspace / "03-runner" / "cc_agent.sh",)
+    elif harness_id == "codex":
+        candidates = (workspace / "03-runner" / "codex_agent.sh",)
+    else:
+        # Compatibility for developer tests and old packages. Participant runs
+        # always resolve through an explicit harness selection in main().
+        candidates = (
+            workspace / "03-runner" / "provider_agent.py",
+            workspace / "03-runner" / "agent_adapter.py",
+            workspace / "03-runner" / "codex_agent.sh",
+            workspace / "03-runner" / "cc_agent.sh",
+            workspace / "03-runner" / "agent.sh",
+        )
     for candidate in candidates:
         if candidate.is_file():
             if candidate.suffix == ".py":
                 return [sys.executable, str(candidate)]
             return [str(candidate)]
     raise ValueError(
-        "no generated Agent adapter found; expected 03-runner/provider_agent.py "
-        "or 03-runner/agent_adapter.py"
+        f"selected harness adapter not found for {harness_id or 'legacy'}; "
+        "expected 03-runner/cc_agent.sh or 03-runner/codex_agent.sh"
     )
 
 
@@ -308,9 +359,14 @@ def resolve_scorer_command(workspace: Path, output_dir: Path, explicit: list[str
     return [sys.executable, str(scorer), "--outputs", str(output_dir)]
 
 
-def validate_generated_package(source: Path, explicit_agent: list[str] | None, explicit_scorer: list[str] | None) -> None:
+def validate_generated_package(
+    source: Path,
+    explicit_agent: list[str] | None,
+    explicit_scorer: list[str] | None,
+    harness_id: str | None = None,
+) -> None:
     """Fail preflight before a participant enters a key if generated tools are missing."""
-    resolve_agent_command(source, explicit_agent)
+    resolve_agent_command(source, explicit_agent, harness_id)
     if explicit_scorer is None and not (source / "02-evaluation" / "scorer.py").is_file():
         raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
 
@@ -344,6 +400,23 @@ def choose_index(items: list[tuple[str, str]], label: str) -> str:
             print(f"请输入 1-{len(items)} 之间的编号。", file=sys.stderr)
             continue
         return selected[0]
+
+
+def resolve_harnesses(catalog: dict, args: argparse.Namespace) -> list[dict]:
+    entries = catalog["harnesses"]
+    by_id = {entry["id"]: entry for entry in entries}
+    if args.harness:
+        if args.harness not in by_id:
+            raise ValueError(f"harness is not allowlisted: {args.harness}")
+        return [by_id[args.harness]]
+    if args.preflight and not args.interactive:
+        return entries
+    if args.interactive or sys.stdin.isatty():
+        choices = [(entry["id"], entry.get("display_name", entry["id"])) for entry in entries]
+        return [by_id[choose_index(choices, "请选择 harness:")]]
+    # Explicit model-only CI invocations from older packages continue to use
+    # Codex, while participant-facing interactive runs always ask first.
+    return [by_id["codex"]]
 
 
 def resolve_models(catalog: dict, args: argparse.Namespace) -> list[dict]:
@@ -415,13 +488,15 @@ def build_environment(
     roll_dir: Path | None = None,
     fixtures_dir: Path | None = None,
     isolation_manifest: Path | None = None,
+    harness: dict | None = None,
 ) -> dict[str, str]:
     """Build a minimal child environment with explicit provider and roll paths."""
     native_parameters = build_provider_parameters(model, profile)
     provider_request = build_provider_request(model, profile)
     env = {"PATH": os.environ.get("PATH", "")}
-    if os.environ.get("CODEX_BIN"):
-        env["CODEX_BIN"] = os.environ["CODEX_BIN"]
+    for executable_env in ("CODEX_BIN", "CLAUDE_BIN"):
+        if os.environ.get(executable_env):
+            env[executable_env] = os.environ[executable_env]
     credential_env = model.get("credential_env")
     if credential_env and credential:
         env[credential_env] = credential
@@ -440,6 +515,9 @@ def build_environment(
             "VERIFORGE_PARAMETERS_JSON": json.dumps(profile.get("parameters", {}), sort_keys=True),
             "VERIFORGE_NATIVE_PARAMETERS_JSON": json.dumps(native_parameters, sort_keys=True),
             "VERIFORGE_PROVIDER_REQUEST_JSON": json.dumps(provider_request, sort_keys=True),
+            "VERIFORGE_HARNESS_ID": str((harness or {}).get("id", "")),
+            "VERIFORGE_HARNESS_PROTOCOL": str((harness or {}).get("protocol", "")),
+            "VERIFORGE_WODEX_BASE_URL": str((harness or {}).get("base_url", "https://api.wodex.ai")),
         }
     )
     if workspace is not None:
@@ -558,6 +636,7 @@ def run_roll(
     index: int,
     config_digest: str,
     task_spec_digest: str,
+    harness: dict | None = None,
 ) -> dict:
     started = utc_now()
 
@@ -581,7 +660,11 @@ def run_roll(
         else workspace / "02-evaluation" / "fixtures"
     )
     staged_spec_hash = file_hash(staged_spec)
-    command = resolve_agent_command(workspace, args.agent_command) if not args.dry_run else None
+    command = resolve_agent_command(
+        workspace,
+        args.agent_command,
+        getattr(args, "harness_id", None),
+    ) if not args.dry_run else None
     scorer_command = (
         resolve_scorer_command(workspace, output_dir, getattr(args, "scorer_command", None))
         if not args.dry_run
@@ -591,6 +674,8 @@ def run_roll(
     provider_request = build_provider_request(model, profile)
     record = {
         "task_id": args.task_id,
+        "harness_id": (harness or {}).get("id"),
+        "harness": (harness or {}).get("display_name"),
         "model_id": model["id"],
         "model_name": model["model_name"],
         "provider": model["provider"],
@@ -638,6 +723,7 @@ def run_roll(
             if isolation_manifest.get("manifest_path")
             else None
         ),
+        harness=harness,
     )
     env["VERIFORGE_SCORER_RESULT"] = str(roll_dir / "scorer-result.json")
     print(f"[veriforge] roll {index}/{args.rolls}: starting agent in {workspace}", flush=True)
@@ -745,6 +831,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models-file", type=Path, default=Path("03-runner/models.yaml"))
     parser.add_argument("--task-id", default="unversioned-task")
     parser.add_argument("--model")
+    parser.add_argument("--harness", choices=sorted(CANONICAL_HARNESS_IDS))
+    parser.add_argument(
+        "--harnesses-file",
+        type=Path,
+        default=Path("03-runner/harnesses.yaml"),
+        help="organizer-approved CC/Codex harness matrix",
+    )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--rolls", type=int)
     parser.add_argument("--preflight", action="store_true")
@@ -782,6 +875,23 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     catalog = load_catalog(args.models_file)
+    harness_path = args.harnesses_file.resolve()
+    if not harness_path.is_file() and args.harnesses_file == Path("03-runner/harnesses.yaml"):
+        candidate_source = args.workspace_source or infer_workspace_source(args.task_spec.resolve())
+        candidate = candidate_source / "03-runner" / "harnesses.yaml"
+        if candidate.is_file():
+            harness_path = candidate.resolve()
+    if harness_path.is_file():
+        harness_catalog = load_harness_catalog(harness_path)
+    elif args.harness:
+        raise ValueError(f"harnesses file not found: {harness_path}")
+    else:
+        # Old developer-only packages may not have the new matrix yet. They
+        # continue to work through the legacy provider adapter; generated
+        # participant packages always ship harnesses.yaml.
+        harness_catalog = {
+            "harnesses": [dict(value, id=key) for key, value in CANONICAL_HARNESSES.items()],
+        }
     roll_policy = catalog.get("roll_policy", {})
     if args.rolls is None:
         args.rolls = roll_policy.get("default_rolls", 1)
@@ -790,6 +900,9 @@ def main() -> int:
     if args.rolls < min_rolls or args.rolls > max_rolls:
         raise ValueError(f"--rolls must be between {min_rolls} and {max_rolls}")
 
+    harnesses = resolve_harnesses(harness_catalog, args)
+    harness = harnesses[0]
+    args.harness_id = harness.get("id") if harness_path.is_file() else None
     models = resolve_models(catalog, args)
     args.task_spec = args.task_spec.resolve()
     if not args.task_spec.is_file():
@@ -803,13 +916,24 @@ def main() -> int:
     args.workspace_source = (args.workspace_source or infer_workspace_source(args.task_spec)).resolve()
     if not args.workspace_source.is_dir():
         raise ValueError(f"workspace source not found: {args.workspace_source}")
-    validate_generated_package(args.workspace_source, args.agent_command, args.scorer_command)
+    validate_generated_package(
+        args.workspace_source,
+        args.agent_command,
+        args.scorer_command,
+        args.harness_id if harness_path.is_file() else None,
+    )
     if args.preflight:
         # Credential mode is per_selected_model. A matrix-only preflight may
         # report all five variables, but only an explicitly selected model can
         # make the preflight fail for a missing credential.
         selected_for_check = bool(args.model or args.interactive)
         missing = check_credentials(models) if selected_for_check else []
+        for entry in harnesses:
+            executable = entry.get("executable_env", "")
+            override = os.environ.get(executable)
+            found = override or shutil.which(entry.get("executable", ""))
+            state = "ready" if found else "missing"
+            print(f"{entry['id']}: harness {state} ({entry.get('executable')})")
         for model in models:
             variable = model.get("credential_env")
             state = "ready" if not variable or os.environ.get(variable) else "missing"
@@ -821,6 +945,7 @@ def main() -> int:
     model = models[0]
     if args.results_dir is None:
         args.results_dir = default_results_dir(model["id"])
+    print(f"[veriforge] 已选择 harness: {harness.get('display_name', harness['id'])} ({harness['id']})")
     print(f"[veriforge] 已选择模型: {model.get('display_name', model['id'])} ({model['id']})")
     print(f"[veriforge] rollout 次数: {args.rolls}")
     print(f"[veriforge] 结果目录: {args.results_dir}")
@@ -858,6 +983,7 @@ def main() -> int:
                 roll,
                 digest,
                 task_spec_digest,
+                harness=harness,
             )
         )
 
@@ -866,6 +992,8 @@ def main() -> int:
         json.dumps(
             {
                 "task_id": args.task_id,
+                "harness_id": harness["id"],
+                "harness": harness.get("display_name", harness["id"]),
                 "benchmark_status": "verified",
                 "runs": records,
             },
