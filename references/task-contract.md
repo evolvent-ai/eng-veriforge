@@ -119,5 +119,29 @@ never be persisted.
 Each roll must record task ID/version, selected model ID, fixed profile ID,
 fixed parameters, roll count and roll number,
 start/end timestamps, runner version, harness allowlist hash,
-scorer version, status, score, and output paths. It must not contain secret
-values or credential environment variable values.
+task spec hash, scorer version, status, score, and output paths. It must not
+contain secret values or credential environment variable values.
+
+## Adapter and output-contract handoff
+
+`task.yaml` is the source of truth for the Agent instructions and required
+output shape. The participant runner exposes its absolute path as
+`VERIFORGE_TASK_SPEC`. A task-specific adapter must stage a copy with write
+permission removed inside the isolated Agent workspace and explicitly tell the
+Agent to read it. If staging changes paths, the adapter must document the
+mapping (for example, `02-evaluation/fixtures` to `fixtures/`).
+
+The adapter prompt must repeat the exact required output filenames, JSON object
+keys, allowed enum values, required Markdown headings, evidence reference
+shape, and fatal safety constraints. Filenames alone are insufficient because
+an Agent can produce a plausible but validator-incompatible schema. The
+adapter must reject missing outputs or non-zero Agent exits before scoring.
+
+Every string field that the scorer compares exactly must have its closed
+codebook declared in `task.yaml` and repeated in the adapter prompt. Exact-match
+values must not exist only in `reference_answer/`, because the Agent would be
+asked to guess a hidden evaluator convention.
+
+Before a task is handed off, run two deterministic smoke checks: the reference
+answer must pass the scorer, and a deliberately malformed output using missing
+or alternate keys must fail the schema validator with a bounded diagnostic.

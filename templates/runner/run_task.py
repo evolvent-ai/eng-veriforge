@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.1"
+RUNNER_VERSION = "veriforge-runner/v1.2"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 
 
@@ -148,9 +148,11 @@ def check_credentials(models: list[dict]) -> list[str]:
     return missing
 
 
-def build_environment(model: dict, profile: dict, credential: str | None) -> dict[str, str]:
+def build_environment(model: dict, profile: dict, credential: str | None, task_spec: Path) -> dict[str, str]:
     """Pass only the selected credential and VeriForge metadata to the child."""
     env = {"PATH": os.environ.get("PATH", "")}
+    if os.environ.get("CODEX_BIN"):
+        env["CODEX_BIN"] = os.environ["CODEX_BIN"]
     credential_env = model.get("credential_env")
     if credential_env and credential:
         env[credential_env] = credential
@@ -161,6 +163,7 @@ def build_environment(model: dict, profile: dict, credential: str | None) -> dic
             "VERIFORGE_PROVIDER": str(model.get("provider", "")),
             "VERIFORGE_CODEX_MODEL_PROVIDER": str(model.get("codex_model_provider", "")),
             "VERIFORGE_CODEX_BASE_URL": str(model.get("codex_base_url", "")),
+            "VERIFORGE_TASK_SPEC": str(task_spec),
             "VERIFORGE_PROFILE_ID": profile["id"],
             "VERIFORGE_PARAMETERS_JSON": json.dumps(profile.get("parameters", {}), sort_keys=True),
         }
@@ -183,6 +186,7 @@ def run_roll(
     args: argparse.Namespace,
     index: int,
     config_digest: str,
+    task_spec_digest: str,
 ) -> dict:
     started = utc_now()
     command = args.agent_command
@@ -195,6 +199,7 @@ def run_roll(
         "roll": index,
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
+        "task_spec_hash": task_spec_digest,
         "started_at": started,
         "status": "dry_run" if args.dry_run else "pending",
     }
@@ -208,7 +213,7 @@ def run_roll(
     try:
         completed = subprocess.run(
             command,
-            env=build_environment(model, profile, credential),
+            env=build_environment(model, profile, credential, args.task_spec),
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -254,6 +259,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
+    parser.add_argument("--task-spec", type=Path, default=Path("01-task/task.yaml"))
     parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
     # Accept both ``--agent-command command`` and the conventional
     # ``--agent-command -- command`` form used in shell examples.
@@ -280,6 +286,12 @@ def main() -> int:
         raise ValueError(f"--rolls must be between {min_rolls} and {max_rolls}")
 
     models = resolve_models(catalog, args)
+    args.task_spec = args.task_spec.resolve()
+    if not args.task_spec.is_file():
+        if args.preflight:
+            print(f"task spec not found: {args.task_spec}", file=sys.stderr)
+            return 2
+        raise ValueError(f"task spec not found: {args.task_spec}")
     if args.preflight:
         missing = check_credentials(models)
         for model in models:
@@ -305,10 +317,11 @@ def main() -> int:
             raise ValueError("API Key cannot be empty")
 
     digest = catalog_hash(catalog)
+    task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
-        records.append(run_roll(model, profile, credential, args, roll, digest))
+        records.append(run_roll(model, profile, credential, args, roll, digest, task_spec_digest))
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     output = args.results_dir / "run-manifest.json"

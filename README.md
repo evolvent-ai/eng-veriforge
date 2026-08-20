@@ -52,6 +52,17 @@ runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 pro
 中声明非敏感的 `codex_model_provider` 和 `codex_base_url`，由 adapter 注入
 临时配置，不能加载参与者的全局 Codex 配置。
 
+runner 会把任务定义文件的绝对路径通过 `VERIFORGE_TASK_SPEC` 传给 adapter。
+adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文件，并在 prompt
+中明确列出 validator 要求的精确字段名、枚举、证据引用格式和 Markdown
+标题。只列出输出文件名，或让 Agent 自行发明 JSON key，不符合 VeriForge
+契约。分发前应让 reference answer 通过 scorer，并让一个缺少必填字段或
+使用替代 key 的输出以确定性 schema 错误失败。
+
+如果另一台机器上的 Codex 可执行文件不在默认路径，adapter 可以使用
+`CODEX_BIN`；runner 只会显式转发这个已知的非敏感变量，不会透传完整用户
+环境。
+
 参赛者只能选择 `models.yaml` 中声明的模型，不能通过命令行临时覆盖
 temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的
 API Key 环境变量不存在，runner 会用隐藏输入提示输入 Key；Key 只注入

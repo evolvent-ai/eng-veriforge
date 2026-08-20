@@ -161,6 +161,38 @@ preflight dependencies and runtime secrets
   -> aggregate model × N-roll results
 ```
 
+### Adapter contract handoff
+
+The task-specific Agent adapter is the boundary between the benchmark contract
+and the model. It must not rely on the model inferring an output format from
+filenames or a short task summary. The runner passes the absolute task spec
+path in `VERIFORGE_TASK_SPEC`; the adapter must:
+
+1. copy that spec into the isolated Agent workspace as a read-only instruction
+   file (for example, `task.yaml`, with write permission removed);
+2. tell the Agent to read the staged spec before reading fixtures; and
+3. restate every required output filename, object key, enum, required section,
+   evidence mapping, and fatal constraint in the adapter prompt. The field
+   names must match the deterministic validator exactly. Do not use synonyms
+   such as `requests` for `reviews` or `reason` for `rationale_code`.
+
+Any string field that the scorer compares exactly (for example, rationale
+codes, statuses, or category labels) must have a closed codebook in `task.yaml`
+and in the Agent prompt. Do not leave exact-match vocabularies implicit in the
+reference answer; that makes the benchmark under-specified rather than
+measuring the intended task skill.
+
+The adapter must map paths in the task spec to the staged workspace explicitly
+when staging changes their location. It must also keep the task spec outside
+the Agent output directory so the Agent cannot satisfy the task by editing the
+contract. A generated adapter is incomplete if it only names output files or
+leaves the model to invent a JSON schema.
+
+Before handoff, run a schema smoke test that confirms the reference answer
+passes the scorer and a deliberately malformed alternate-key output fails with
+a deterministic schema error. Then run the adapter once end to end and retain
+the score and failure diagnostics in the local evidence directory.
+
 The participant runner must support:
 
 ```bash
@@ -208,6 +240,11 @@ into the child process memory only. Never write it to task files, logs,
 manifests, results, shell history, or error messages. The credential variable
 name belongs in `models.yaml`; its value never does.
 
+If an adapter supports a machine-specific executable override such as
+`CODEX_BIN`, the runner may forward that named non-secret variable explicitly.
+Do not forward the participant's full environment; allowlist each adapter
+override by name.
+
 ### Participant workflow
 
 The participant uses the Skill to author a task package, then runs the same
@@ -243,6 +280,10 @@ the run manifest. The task status (`concept`, `prototype`, `verified`, or
   `03-runner/dependency-manifest.yaml` and preflight them before execution.
 - Test the credential prompt, both `--agent-command` forms, roll lifecycle
   messages, timeout handling, and a missing-command failure before handoff.
+- Test that `VERIFORGE_TASK_SPEC` reaches the adapter, the adapter stages the
+  spec read-only, and the Agent prompt uses the validator's exact output keys.
+- Run the reference-answer and malformed-output schema smoke tests before
+  treating an adapter rollout as evidence.
 
 ## Self-check before handoff
 
@@ -260,6 +301,10 @@ Verify:
 - the allowlist contains only confirmed, available capabilities;
 - no secret, real customer data, absolute personal path, or broad mount exists;
 - the task state accurately reflects the validation level.
+- the adapter stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
+- every exact-match string field has a public codebook in the task spec;
+- each roll records the task spec hash alongside the model and scorer hashes;
+- the reference answer passes and an alternate-key output fails deterministically;
 
 Report the task objective, state, three artifact paths, dependency status,
 allowlist confirmation status, remaining user preparation, and the command to
