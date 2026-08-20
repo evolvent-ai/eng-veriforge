@@ -2,6 +2,14 @@ schema_version: "veriforge-model-matrix/v2"
 task_id: "example-activity-v1"
 policy: fixed_for_task_version
 
+# Organizer-owned activity policy. Participants receive the completed file and
+# may select one model, but may not add models or change profiles/parameters.
+organizer_controls:
+  model_matrix_locked: true
+  participant_model_choice_only: true
+  fixed_model_count: 5
+  credential_mode: per_selected_model
+
 selection:
   mode: participant_selects_one
   allow_participant_model_choice: true

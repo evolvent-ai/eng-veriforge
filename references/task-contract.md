@@ -114,6 +114,24 @@ and custom parameters are not participant choices. A missing
 `credential_env` value may be entered at runtime using hidden input and must
 never be persisted.
 
+For a fixed activity, `models.yaml` may include:
+
+```yaml
+organizer_controls:
+  model_matrix_locked: true
+  participant_model_choice_only: true
+  fixed_model_count: 5
+  credential_mode: per_selected_model # or single_runtime_key
+```
+
+When this block is present, the runner requires exactly the declared number of
+models, rejects `REPLACE_WITH_*` values, and rejects participant profile or
+parameter overrides. `single_runtime_key` additionally requires a confirmed
+`organizer_controls.credential_env` and the same `credential_env` on every
+model. The lock is a task-package policy; a competition distributor should
+also publish an artifact checksum or otherwise prevent participants from
+editing `models.yaml` after distribution.
+
 ## Run manifest
 
 Each roll must record task ID/version, selected model ID, fixed profile ID,

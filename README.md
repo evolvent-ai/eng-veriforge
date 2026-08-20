@@ -19,6 +19,30 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 
 详细契约见 `references/task-contract.md`。
 
+## 活动预配置
+
+如果这是一个面向参赛者的固定活动，主办方应在任务包生成前锁定一个
+`models.yaml`：模型数量、canonical model ID、provider、endpoint、credential
+变量名和固定 profile 都由主办方提供。可以使用 `organizer_controls` 声明
+固定五模型矩阵；runner 会拒绝数量不符或仍含 `REPLACE_WITH_*` 的配置。
+
+参赛者拿到任务包后不需要填写 provider、endpoint 或模型 ID，只能从这五个
+已批准模型中选择一个，并在运行时输入所选模型的 API Key。若五个模型必须
+共用一个 API Key，主办方需要让它们通过同一个已确认的 provider gateway，
+并把所有 `credential_env` 固定为同一个变量；否则使用
+`per_selected_model`，参赛者每次只输入当前所选模型对应的一个 Key。
+
+默认能力基线建议只包含：
+
+- Codex CLI adapter；
+- Claude Code（CC）CLI adapter，具体命令名和版本由主办方确认；
+- Python 3 和 PyYAML 作为 runner 依赖。
+
+默认不启用 MCP、额外 Skill、浏览器、外部应用或网络。CC/Codex 是执行
+adapter 的 CLI 能力，不是 `models.yaml` 中可以由参赛者自由添加的 provider。
+只有完成 `--version`/`--help` 等只读检查并经主办方确认的 CLI，才能写入
+`harness.allowlist.yaml`。
+
 ## 参赛者模型选择
 
 活动可以在任务包的 `03-runner/models.yaml` 中声明允许的模型和固定超参。

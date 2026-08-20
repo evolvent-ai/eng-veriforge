@@ -26,6 +26,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
 
 RUNNER_VERSION = "veriforge-runner/v1.2"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
+PLACEHOLDER_MARKER = "REPLACE_WITH_"
 
 
 def utc_now() -> str:
@@ -91,6 +92,36 @@ def load_catalog(path: Path) -> dict:
                 raise ValueError(f"profile {profile_id} for {model_id} needs a parameter mapping")
         if fixed_profile not in seen_profiles:
             raise ValueError(f"model {model_id} has no fixed profile {fixed_profile}")
+
+        for field in ("provider", "model_name", "endpoint", "credential_env"):
+            value = model.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"model {model_id} needs a confirmed {field}")
+            if PLACEHOLDER_MARKER in value:
+                raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
+
+    organizer_controls = catalog.get("organizer_controls")
+    if organizer_controls is not None:
+        if not isinstance(organizer_controls, dict):
+            raise ValueError("organizer_controls must be a mapping")
+        if organizer_controls.get("model_matrix_locked") is not True:
+            raise ValueError("organizer_controls.model_matrix_locked must be true")
+        if organizer_controls.get("participant_model_choice_only") is not True:
+            raise ValueError("organizer_controls.participant_model_choice_only must be true")
+        fixed_count = organizer_controls.get("fixed_model_count")
+        if not isinstance(fixed_count, int) or isinstance(fixed_count, bool) or fixed_count < 1:
+            raise ValueError("organizer_controls.fixed_model_count must be a positive integer")
+        if len(models) != fixed_count:
+            raise ValueError(f"models.yaml must contain exactly {fixed_count} organizer-approved models")
+        credential_mode = organizer_controls.get("credential_mode", "per_selected_model")
+        if credential_mode not in {"per_selected_model", "single_runtime_key"}:
+            raise ValueError("organizer_controls.credential_mode is invalid")
+        if credential_mode == "single_runtime_key":
+            shared_env = organizer_controls.get("credential_env")
+            if not isinstance(shared_env, str) or not shared_env or PLACEHOLDER_MARKER in shared_env:
+                raise ValueError("single_runtime_key requires a confirmed organizer_controls.credential_env")
+            if any(model.get("credential_env") != shared_env for model in models):
+                raise ValueError("all models must use organizer_controls.credential_env in single_runtime_key mode")
 
     return catalog
 

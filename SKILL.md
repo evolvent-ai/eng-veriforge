@@ -64,6 +64,20 @@ infer provider-specific IDs or parameters from a marketing name. Participants
 may choose one model per run, but the model matrix and that model's parameters
 are organizer-provided and immutable.
 
+For a participant-facing activity with five choices, require the organizer to
+provide exactly five confirmed entries before publishing the package. Put
+`organizer_controls.model_matrix_locked: true`,
+`participant_model_choice_only: true`, and `fixed_model_count: 5` in
+`models.yaml`. Reject the package while any provider, endpoint, model ID, or
+credential variable contains `REPLACE_WITH_*`. The participant workflow should
+expose only model selection, rollout count, and runtime API-key input.
+
+If the organizer wants one API Key prompt for all five models, use
+`credential_mode: single_runtime_key` only when all models are served by the
+same confirmed gateway and share one credential environment variable. Otherwise
+use `per_selected_model`; the participant still enters only one key for the
+model selected in that run.
+
 If the user only has an idea, propose one or more measurable task versions and
 identify the missing evidence. It is valid to create a `concept` package before
 the task has ever been run manually.
@@ -94,6 +108,13 @@ Present the proposed allowlist and ask the user to confirm:
 Only confirmed, available, and workspace-safe dependencies may enter
 `harness.allowlist.yaml`. Missing, unconfirmed, or over-broad capabilities stay
 out of the harness.
+
+For the default local activity, propose only the confirmed Codex CLI and, if the
+organizer supplies a Claude Code adapter, the confirmed Claude Code (CC) CLI.
+Do not add MCPs, extra Skills, browsers, external apps, or network domains
+unless the organizer explicitly confirms a task requirement and its isolation
+boundary. A CLI belongs in the allowlist only after a harmless `--version` or
+`--help` check; do not infer that `cc` means a particular executable name.
 
 If the underlying harness cannot enforce the allowlist, set the task state to
 `blocked`; do not claim isolation.
@@ -142,6 +163,8 @@ Rules:
 - Default network to deny and external side effects to forbidden.
 - Use `veriforge-model-matrix/v2` when the task exposes a participant model
   choice. The matrix must contain only organizer-approved models.
+- For a five-choice activity, include `organizer_controls` and keep exactly
+  five confirmed models; never ship unresolved placeholders to participants.
 - Set `selection.mode` to `participant_selects_one`, disable participant
   profile/custom-parameter choices, and define the same fixed profile ID for
   every model. The profile is selected automatically after the participant
