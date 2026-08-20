@@ -182,8 +182,8 @@ finishes, report a bounded failure diagnostic, and enforce the profile's
 `timeout_seconds`. Redirecting all child output and leaving the participant
 with no progress signal is not an acceptable runner UX.
 Task-specific adapters must propagate a non-zero Agent exit code and retain a
-bounded, secret-redacted stderr diagnostic; they must not redirect failures to
-`/dev/null`.
+bounded, secret-redacted diagnostic from both stdout and stderr; they must not
+redirect failures to `/dev/null`.
 
 When `--model` is omitted, prompt from the allowlisted model entries in
 `models.yaml`. After model selection, if its credential environment variable
