@@ -73,6 +73,5 @@ exec "$codex_bin" exec \
   --skip-git-repo-check \
   --cd "$PWD" \
   --model "$VERIFORGE_MODEL_NAME" \
-  --sandbox workspace-write \
   --approve-for-me \
   - < "$prompt_file"
