@@ -6,10 +6,7 @@
 schema_version: "veriforge-task/v1"
 task_id: "example-task-v1"
 title: "A measurable Agent task"
-status: concept # concept | prototype | verified | blocked
-release:
-  target: authoring # authoring | activity
-  ready_for_activity: false
+status: verified
 execution_mode: local_only
 objective: "What the Agent must accomplish"
 agent_instructions: "Task instructions shown to the Agent"
@@ -28,34 +25,15 @@ constraints:
 acceptance:
   minimum_score: 75
   fatal_rules: []
-lifecycle:
-  score_role: report_only
-  promotion_owner: organizer
-  promotion_checks:
-    prototype: []
-    verified: []
 known_limitations: []
 ```
 
-`status` is organizer-only authoring/release metadata, not a participant
-workflow. For an activity distribution, set `release.target: activity`,
-`release.ready_for_activity: true`, and `status: verified` only after the
-deterministic package, dependency, isolation, and reproducibility checks pass.
-`acceptance.minimum_score` is the pass threshold for one Agent submission, not
-a release threshold. A released package may produce low model scores, and a
-high score on one rollout does not release a `concept` package.
-
-Recommended `lifecycle` checks are:
-
-- `prototype`: task/fixture/reference/scorer/runner exist, reference and
-  malformed-output smoke tests pass, and preflight passes.
-- `verified`: declared dependencies and model configuration are confirmed,
-  isolation and fixture-integrity checks pass, and an end-to-end rollout emits a
-  reproducible manifest and scorer result. The numeric result may be pass or
-  fail.
-
-Participants receive only the resulting activity package and must not edit
-`status` or `release` fields.
+`status: verified` is a fixed package label. It is not inferred from a model
+score, changed during rollout, or edited by participants. `acceptance.minimum_score`
+is only the pass threshold for one Agent submission; the score and execution
+status are the runtime results. Authors run the deterministic smoke checks and
+dependency/fixture/allowlist checks before handoff, but those checks do not
+introduce another task status.
 
 ## `rubric.yaml`
 
@@ -182,11 +160,10 @@ test set.
 
 ## Run manifest
 
-Each roll must record task ID/version, selected model ID, fixed profile ID,
-fixed parameters, roll count and roll number,
-start/end timestamps, runner version, harness allowlist hash,
-task spec hash, scorer version, lifecycle status, execution status, score, and
-output paths. It must not
+Each roll must record task ID/version, fixed `benchmark_status: verified`,
+selected model ID, fixed profile ID, fixed parameters, roll count and roll
+number, start/end timestamps, runner version, harness allowlist hash, task spec
+hash, scorer version, execution status, score, and output paths. It must not
 contain secret values or credential environment variable values.
 
 ## Adapter and output-contract handoff

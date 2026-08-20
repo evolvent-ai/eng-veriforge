@@ -152,27 +152,20 @@ def catalog_hash(catalog: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def load_task_metadata(path: Path) -> dict[str, object]:
-    """Read organizer release metadata; never derive it from a model score."""
+def validate_task_spec(path: Path) -> None:
+    """Require the generated package's single fixed benchmark status."""
     try:
         task = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"task spec not found: {path}") from exc
     except yaml.YAMLError as exc:
         raise ValueError(f"invalid YAML in task spec: {exc}") from exc
     if not isinstance(task, dict):
         raise ValueError("task spec must contain a mapping")
-    status = task.get("status", "concept")
-    if status not in {"concept", "prototype", "verified", "blocked"}:
-        raise ValueError(f"invalid task lifecycle status: {status}")
-    release = task.get("release", {})
-    if not isinstance(release, dict):
-        raise ValueError("task release must contain a mapping")
-    target = release.get("target", "authoring")
-    ready = release.get("ready_for_activity", False)
-    if target not in {"authoring", "activity"}:
-        raise ValueError(f"invalid task release target: {target}")
-    if target == "activity" and (status != "verified" or ready is not True):
-        raise ValueError("activity release requires status=verified and release.ready_for_activity=true")
-    return {"status": status, "target": target, "ready": ready is True}
+    if task.get("status") != "verified":
+        raise ValueError("task spec must set status: verified")
+    if "release" in task or "lifecycle" in task:
+        raise ValueError("task spec must not contain release or lifecycle metadata")
 
 
 def choose_index(items: list[tuple[str, str]], label: str) -> str:
@@ -265,9 +258,6 @@ def run_roll(
     index: int,
     config_digest: str,
     task_spec_digest: str,
-    task_lifecycle_status: str,
-    release_target: str,
-    activity_release_ready: bool,
 ) -> dict:
     started = utc_now()
     command = args.agent_command
@@ -281,10 +271,7 @@ def run_roll(
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
         "task_spec_hash": task_spec_digest,
-        "task_lifecycle_status": task_lifecycle_status,
-        "release_target": release_target,
-        "activity_release_ready": activity_release_ready,
-        "status_scope": "roll",
+        "benchmark_status": "verified",
         "started_at": started,
         "status": "dry_run" if args.dry_run else "pending",
     }
@@ -300,7 +287,7 @@ def run_roll(
             command,
             env=build_environment(model, profile, credential, args.task_spec),
             check=False,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=profile.get("timeout_seconds"),
@@ -324,9 +311,11 @@ def run_roll(
     record["returncode"] = completed.returncode
     record["status"] = "passed" if completed.returncode == 0 else "failed"
     if completed.returncode != 0:
-        diagnostic = redact_diagnostic(completed.stderr or "", credential)
-        if diagnostic:
-            print(f"[veriforge] agent diagnostic: {diagnostic}", file=sys.stderr, flush=True)
+        for stream_name, stream in (("stdout", completed.stdout), ("stderr", completed.stderr)):
+            diagnostic = redact_diagnostic(stream or "", credential)
+            if diagnostic:
+                record[f"agent_{stream_name}_tail"] = diagnostic
+                print(f"[veriforge] agent {stream_name}: {diagnostic}", file=sys.stderr, flush=True)
         print(f"[veriforge] roll {index}/{args.rolls}: agent failed (exit {completed.returncode})", flush=True)
     else:
         print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
@@ -377,7 +366,7 @@ def main() -> int:
             print(f"task spec not found: {args.task_spec}", file=sys.stderr)
             return 2
         raise ValueError(f"task spec not found: {args.task_spec}")
-    task_metadata = load_task_metadata(args.task_spec)
+    validate_task_spec(args.task_spec)
     if args.preflight:
         missing = check_credentials(models)
         for model in models:
@@ -404,9 +393,6 @@ def main() -> int:
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
-    task_lifecycle_status = str(task_metadata["status"])
-    release_target = str(task_metadata["target"])
-    activity_release_ready = bool(task_metadata["ready"])
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
@@ -419,9 +405,6 @@ def main() -> int:
                 roll,
                 digest,
                 task_spec_digest,
-                task_lifecycle_status,
-                release_target,
-                activity_release_ready,
             )
         )
 
@@ -431,10 +414,7 @@ def main() -> int:
         json.dumps(
             {
                 "task_id": args.task_id,
-                "task_lifecycle_status": task_lifecycle_status,
-                "release_target": release_target,
-                "activity_release_ready": activity_release_ready,
-                "status_scope": "rolls",
+                "benchmark_status": "verified",
                 "runs": records,
             },
             indent=2,

@@ -8,17 +8,15 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 2. 评测资产：标答、fixture、rubric、验证器和评分器。
 3. 执行脚本：隔离 harness、Agent 调用、固定模型/超参、评分和 `N` 次 roll 聚合。
 
-任务包的生命周期状态（`concept`、`prototype`、`verified`、`blocked`）与
-模型分数是两个独立维度。状态只供主办方在制作阶段检查，不是参赛者要
-流转的流程。活动发布前，skill 必须完成发布门禁，并交付
-`status: verified` 的任务包；`minimum_score` 只判断某一次提交是否通过
-评分策略，不参与发布状态判断。
+skill 生成的每个任务包都直接是可运行的 `status: verified` 包。状态是固定
+的包元数据，不是参赛者或主办方需要流转的流程；rollout 分数和执行结果是
+唯一需要比较的运行指标。任务包不包含 `release` 或 `lifecycle` 配置。
 
 ## 当前边界
 
 - 单一 Skill，不拆分 Skill2。
-- 作者可以从私有 `concept` 包开始；活动分发包必须在发布前完成验证并为
-  `verified`。
+- skill 会在生成时完成契约、fixture、validator、scorer 和 runner 的装配，
+  并将任务固定为 `verified`；依赖或凭据缺失只作为运行前准备项报告。
 - 运行前只读检查 MCP、CLI、路径和环境变量。
 - 只有用户确认且检查通过的能力才进入 harness allowlist。
 - API Key 只在运行时注入，不写入任务包或日志。
