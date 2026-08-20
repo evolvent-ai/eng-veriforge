@@ -48,7 +48,9 @@ runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 pro
 `timeout_seconds` 限制单次 Agent 运行。API Key 仍只在运行时隐藏输入或从
 环境变量读取，绝不会写入配置、manifest 或错误日志。Agent adapter 必须
 传播非零退出码，并保留经过脱敏的有限 stdout/stderr 诊断，不能把失败
-重定向到 `/dev/null`。
+重定向到 `/dev/null`。如果 Codex 使用非默认 provider，可在 `models.yaml`
+中声明非敏感的 `codex_model_provider` 和 `codex_base_url`，由 adapter 注入
+临时配置，不能加载参与者的全局 Codex 配置。
 
 参赛者只能选择 `models.yaml` 中声明的模型，不能通过命令行临时覆盖
 temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的

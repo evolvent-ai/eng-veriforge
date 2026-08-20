@@ -159,6 +159,8 @@ def build_environment(model: dict, profile: dict, credential: str | None) -> dic
             "VERIFORGE_MODEL_ID": model["id"],
             "VERIFORGE_MODEL_NAME": model["model_name"],
             "VERIFORGE_PROVIDER": str(model.get("provider", "")),
+            "VERIFORGE_CODEX_MODEL_PROVIDER": str(model.get("codex_model_provider", "")),
+            "VERIFORGE_CODEX_BASE_URL": str(model.get("codex_base_url", "")),
             "VERIFORGE_PROFILE_ID": profile["id"],
             "VERIFORGE_PARAMETERS_JSON": json.dumps(profile.get("parameters", {}), sort_keys=True),
         }

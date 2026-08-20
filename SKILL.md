@@ -197,6 +197,11 @@ The model matrix and hyperparameters are fixed in the generated task version.
 Do not let conversational instructions silently override them. Changes require
 an explicit experiment configuration and an auditable task/version update.
 
+If a Codex adapter needs a non-default provider, declare the non-secret
+`codex_model_provider` and `codex_base_url` in the selected model entry and
+pass them as explicit temporary config overrides. Do not load the participant's
+global Codex config into the harness.
+
 When a required API key is absent, ask for its value only at runtime using
 hidden input, or report the missing variable in non-interactive mode. Inject it
 into the child process memory only. Never write it to task files, logs,
