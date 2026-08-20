@@ -52,10 +52,29 @@ class CanonicalMatrixTests(unittest.TestCase):
             loaded = RUNNER.load_catalog(path)
         self.assertEqual({model["id"] for model in loaded["models"]}, RUNNER.CANONICAL_MODEL_IDS)
 
-    def test_wodex_harness_matrix_is_accepted(self):
+    def test_canonical_matrix_uses_the_approved_mixed_providers(self):
+        models = {model["id"]: model for model in self.matrix["models"]}
+        self.assertEqual(models["claude-opus-5"]["provider"], "wodex")
+        self.assertEqual(models["gpt-5.6-sol"]["provider"], "wodex")
+        self.assertEqual(models["qwen3.8-max"]["provider"], "aliyun_maas")
+        self.assertEqual(models["kimi-k3"]["provider"], "moonshot")
+        self.assertEqual(models["deepseek-v4-pro"]["provider"], "deepseek")
+
+    def test_mixed_provider_harness_matrix_is_accepted(self):
         catalog = RUNNER.load_harness_catalog(HARNESSES_PATH)
         self.assertEqual({entry["id"] for entry in catalog["harnesses"]}, {"cc", "codex"})
-        self.assertEqual(catalog["credential_env"], "WODEX_API_KEY")
+        self.assertEqual(catalog["credential_mode"], "per_selected_model")
+
+    def test_harness_filters_model_choices_without_changing_selection_flow(self):
+        args = type("Args", (), {"harness_id": "cc", "preflight": True, "model": None, "interactive": False})()
+        models = RUNNER.resolve_models(self.matrix, args)
+        self.assertEqual([model["id"] for model in models], ["claude-opus-5"])
+        args.harness_id = "codex"
+        models = RUNNER.resolve_models(self.matrix, args)
+        self.assertEqual(
+            {model["id"] for model in models},
+            {"gpt-5.6-sol", "qwen3.8-max", "kimi-k3", "deepseek-v4-pro"},
+        )
 
     def test_harness_selection_never_prefers_provider_adapter(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -161,6 +180,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             env = os.environ.copy()
             for variable in (model["credential_env"] for model in self.matrix["models"]):
                 env.pop(variable, None)
+            env["CODEX_BIN"] = sys.executable
             base = [
                 sys.executable,
                 str(RUNNER_PATH),
@@ -182,14 +202,23 @@ class CanonicalMatrixTests(unittest.TestCase):
         profile = selected["profiles"][0]
         child_env = RUNNER.build_environment(selected, profile, "runtime-secret", Path("task.yaml"))
         self.assertEqual(child_env["WODEX_API_KEY"], "runtime-secret")
+        self.assertEqual(child_env["VERIFORGE_API_KEY"], "runtime-secret")
         self.assertEqual(
             json.loads(child_env["VERIFORGE_NATIVE_PARAMETERS_JSON"]),
             {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
         )
         self.assertEqual(
             {key for key in child_env if key.endswith("_API_KEY")},
-            {"WODEX_API_KEY"},
+            {"WODEX_API_KEY", "VERIFORGE_API_KEY"},
         )
+
+        kimi = next(model for model in self.matrix["models"] if model["id"] == "kimi-k3")
+        kimi_env = RUNNER.build_environment(kimi, kimi["profiles"][0], "moonshot-secret", Path("task.yaml"))
+        self.assertEqual(kimi_env["MOONSHOT_API_KEY"], "moonshot-secret")
+        self.assertEqual(kimi_env["VERIFORGE_API_KEY"], "moonshot-secret")
+        self.assertNotIn("WODEX_API_KEY", kimi_env)
+        self.assertNotIn("DASHSCOPE_API_KEY", kimi_env)
+        self.assertNotIn("DEEPSEEK_API_KEY", kimi_env)
 
     def test_provider_adapters_translate_canonical_parameters(self):
         expected = {

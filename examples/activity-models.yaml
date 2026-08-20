@@ -36,6 +36,7 @@ models:
     endpoint: "messages"
     base_url: "https://api.wodex.ai"
     credential_env: "WODEX_API_KEY"
+    supported_harnesses: ["cc"]
     profiles:
       - id: "default"
         parameters:
@@ -52,6 +53,9 @@ models:
     endpoint: "responses"
     base_url: "https://api.wodex.ai/v1"
     credential_env: "WODEX_API_KEY"
+    supported_harnesses: ["codex"]
+    codex_model_provider: "wodex"
+    codex_base_url: "https://api.wodex.ai/v1"
     profiles:
       - id: "default"
         parameters:
@@ -62,12 +66,15 @@ models:
 
   - id: "qwen3.8-max"
     display_name: "Qwen3.8 Max"
-    provider: "wodex"
+    provider: "aliyun_maas"
     adapter: "openai_chat"
     model_name: "qwen3.8-max"
     endpoint: "chat_completions"
-    base_url: "https://api.wodex.ai/v1"
-    credential_env: "WODEX_API_KEY"
+    base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    credential_env: "DASHSCOPE_API_KEY"
+    supported_harnesses: ["codex"]
+    codex_model_provider: "aliyun_maas"
+    codex_base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
     profiles:
       - id: "default"
         parameters:
@@ -78,12 +85,15 @@ models:
 
   - id: "kimi-k3"
     display_name: "K3"
-    provider: "wodex"
+    provider: "moonshot"
     adapter: "openai_chat"
     model_name: "kimi-k3"
     endpoint: "chat_completions"
-    base_url: "https://api.wodex.ai/v1"
-    credential_env: "WODEX_API_KEY"
+    base_url: "https://api.moonshot.cn/v1"
+    credential_env: "MOONSHOT_API_KEY"
+    supported_harnesses: ["codex"]
+    codex_model_provider: "moonshot"
+    codex_base_url: "https://api.moonshot.cn/v1"
     profiles:
       - id: "default"
         parameters:
@@ -94,12 +104,15 @@ models:
 
   - id: "deepseek-v4-pro"
     display_name: "DeepSeek V4 Pro"
-    provider: "wodex"
+    provider: "deepseek"
     adapter: "openai_chat"
     model_name: "deepseek-v4-pro"
     endpoint: "chat_completions"
-    base_url: "https://api.wodex.ai/v1"
-    credential_env: "WODEX_API_KEY"
+    base_url: "https://api.deepseek.com"
+    credential_env: "DEEPSEEK_API_KEY"
+    supported_harnesses: ["codex"]
+    codex_model_provider: "deepseek"
+    codex_base_url: "https://api.deepseek.com"
     profiles:
       - id: "default"
         parameters:

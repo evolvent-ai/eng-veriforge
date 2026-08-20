@@ -2,7 +2,7 @@
 set -euo pipefail
 
 : "${VERIFORGE_MODEL_NAME:?VERIFORGE_MODEL_NAME is required}"
-: "${WODEX_API_KEY:?WODEX_API_KEY is required}"
+: "${VERIFORGE_API_KEY:?VERIFORGE_API_KEY is required}"
 
 task_spec="${VERIFORGE_TASK_SPEC:-01-task/task.yaml}"
 roll_dir="${VERIFORGE_ROLL_DIR:-.veriforge-roll}"
@@ -23,18 +23,21 @@ if [[ ! -f "$task_spec" ]]; then
 fi
 
 # CODEX_HOME is per-roll, so no participant global config, MCP, plugin, or
-# session state can affect this rollout. Wodex exposes an OpenAI Responses API.
+# session state can affect this rollout. The selected provider is configured
+# through its OpenAI Responses-compatible endpoint.
+provider_id="${VERIFORGE_CODEX_MODEL_PROVIDER:-veriforge-provider}"
+provider_base_url="${VERIFORGE_CODEX_BASE_URL:-${VERIFORGE_BASE_URL:?VERIFORGE_BASE_URL is required}}"
 cat > "$roll_dir/codex-home/config.toml" <<EOF
-model_provider = "wodex"
+model_provider = "$provider_id"
 model = "$VERIFORGE_MODEL_NAME"
 model_reasoning_effort = "xhigh"
 disable_response_storage = true
 
-[model_providers.wodex]
-name = "wodex"
+[model_providers.$provider_id]
+name = "$provider_id"
 wire_api = "responses"
 requires_openai_auth = true
-base_url = "${VERIFORGE_CODEX_BASE_URL:-https://api.wodex.ai/v1}"
+base_url = "$provider_base_url"
 EOF
 
 prompt_file="$roll_dir/codex-prompt.md"
@@ -65,7 +68,7 @@ PROMPT
 } > "$prompt_file"
 
 export CODEX_HOME="$roll_dir/codex-home"
-export OPENAI_API_KEY="$WODEX_API_KEY"
+export OPENAI_API_KEY="$VERIFORGE_API_KEY"
 export CODEX_DISABLE_UPDATE_CHECK=1
 
 exec "$codex_bin" exec \

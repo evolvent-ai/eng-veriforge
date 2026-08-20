@@ -2,7 +2,7 @@
 set -euo pipefail
 
 : "${VERIFORGE_MODEL_NAME:?VERIFORGE_MODEL_NAME is required}"
-: "${WODEX_API_KEY:?WODEX_API_KEY is required}"
+: "${VERIFORGE_API_KEY:?VERIFORGE_API_KEY is required}"
 
 task_spec="${VERIFORGE_TASK_SPEC:-01-task/task.yaml}"
 roll_dir="${VERIFORGE_ROLL_DIR:-.veriforge-roll}"
@@ -19,6 +19,10 @@ if [[ -z "$claude_bin" || ! -x "$claude_bin" ]]; then
 fi
 if [[ ! -f "$task_spec" ]]; then
   printf '%s\n' "Task spec not found: $task_spec" >&2
+  exit 2
+fi
+if [[ "${VERIFORGE_ADAPTER:-}" != "anthropic_messages" ]]; then
+  printf '%s\n' "Selected model is not compatible with Claude Code's Anthropic protocol; choose Codex CLI." >&2
   exit 2
 fi
 
@@ -49,10 +53,10 @@ files on disk, not your final chat response.
 PROMPT
 } > "$prompt_file"
 
-export ANTHROPIC_BASE_URL="${VERIFORGE_CLAUDE_BASE_URL:-https://api.wodex.ai}"
-export ANTHROPIC_AUTH_TOKEN="$WODEX_API_KEY"
+export ANTHROPIC_BASE_URL="${VERIFORGE_CLAUDE_BASE_URL:-${VERIFORGE_BASE_URL:?VERIFORGE_BASE_URL is required}}"
+export ANTHROPIC_AUTH_TOKEN="$VERIFORGE_API_KEY"
 # Some Claude Code releases still inspect this alias during startup.
-export ANTHROPIC_API_KEY="$WODEX_API_KEY"
+export ANTHROPIC_API_KEY="$VERIFORGE_API_KEY"
 export ANTHROPIC_MODEL="$VERIFORGE_MODEL_NAME"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$roll_dir/claude-config}"
 

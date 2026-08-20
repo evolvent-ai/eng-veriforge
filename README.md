@@ -10,8 +10,8 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 ./03-runner/run_benchmark.sh
 ```
 
-脚本会依次让参赛者选择 harness（Claude Code 或 Codex）、选择模型、隐藏输入
-Wodex API Key，然后默认自动执行 3 次隔离 rollout 和评分。每次运行使用新的
+脚本会依次让参赛者选择 harness（Claude Code 或 Codex）、选择兼容模型、隐藏
+输入该模型的 API Key，然后默认自动执行 3 次隔离 rollout 和评分。每次运行使用新的
 `results/<model>-<timestamp>/` 目录，不需要配置 provider、adapter、scorer、
 workspace 或输出路径。
 
@@ -36,7 +36,7 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 - 运行前只读检查 MCP、CLI、路径和环境变量。
 - 只有用户确认且检查通过的能力才进入 harness allowlist。
 - API Key 只在运行时注入，不写入任务包或日志。
-- 当前版本使用主办方 Wodex gateway，不包含云端 ZIP 上传、Harbor 调度或凭据托管。
+- 当前版本使用主办方锁定的混合 provider 矩阵，不包含云端 ZIP 上传、Harbor 调度或凭据托管。
 
 详细契约见 `references/task-contract.md`。
 
@@ -51,8 +51,9 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 不完整、provider 映射不一致或仍含 `REPLACE_WITH_*` 的配置。
 
 参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，先选择
-CC 或 Codex，再从这五个已批准模型中选择一个，在运行时输入唯一的
-`WODEX_API_KEY`，并选择 rollout 次数。
+CC 或 Codex，再从该 harness 的兼容模型中选择一个，在运行时输入一次所选模型
+的 API Key，并选择 rollout 次数。runner 会在内部处理 Wodex、阿里云 MaaS、
+Moonshot 和 DeepSeek 的配置差异。
 
 默认能力基线建议只包含：
 
@@ -61,8 +62,8 @@ CC 或 Codex，再从这五个已批准模型中选择一个，在运行时输�
 - Python 3 和 PyYAML 作为 runner 依赖。
 
 默认不启用 MCP、额外 Skill、浏览器、外部应用或额外网络。CC/Codex 是执行
-harness，不是 `models.yaml` 中可以由参赛者自由添加的 provider；五个模型都
-通过 Wodex。
+harness，不是 `models.yaml` 中可以由参赛者自由添加的 provider；provider 和
+endpoint 都由主办方锁定。
 只有完成 `--version`/`--help` 等只读检查并经主办方确认的 CLI，才能写入
 `harness.allowlist.yaml`。
 
@@ -100,12 +101,12 @@ python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-
 ```
 
 runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 profile 中的
-`timeout_seconds` 限制单次 Agent 运行。Wodex API Key 仍只在运行时隐藏输入或从
-环境变量读取，绝不会写入配置、manifest 或错误日志。Agent adapter 必须
+`timeout_seconds` 限制单次 Agent 运行。所选模型的 API Key 只在运行时隐藏输入
+或从内部映射的环境变量读取，绝不会写入配置、manifest 或错误日志。Agent adapter 必须
 传播非零退出码，并保留经过脱敏的有限 stdout/stderr 诊断，不能把失败
-重定向到 `/dev/null`。Codex harness 会为每个 roll 注入临时 Wodex provider
-配置，不能加载参与者的全局 Codex 配置；CC harness 使用 Wodex 的 Anthropic
-兼容环境变量和 `Read/Write/Edit/Glob/Grep` 文件工具白名单。
+重定向到 `/dev/null`。Codex harness 会为每个 roll 注入所选模型的临时 provider
+配置，不能加载参与者的全局 Codex 配置；CC harness 使用已批准的 Anthropic
+兼容配置和 `Read/Write/Edit/Glob/Grep` 文件工具白名单。
 
 每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
 Agent 的 cwd；`outputs`、stdout/stderr 日志、scorer result、HOME、配置和

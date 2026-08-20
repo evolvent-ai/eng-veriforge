@@ -1,17 +1,13 @@
 schema_version: "veriforge-harness-matrix/v1"
-credential_env: "WODEX_API_KEY"
-network:
-  base_url: "https://api.wodex.ai"
+credential_mode: "per_selected_model"
 harnesses:
   - id: "cc"
     display_name: "Claude Code (CC)"
     executable: "claude"
     executable_env: "CLAUDE_BIN"
     protocol: "anthropic"
-    base_url: "https://api.wodex.ai"
   - id: "codex"
     display_name: "Codex CLI"
     executable: "codex"
     executable_env: "CODEX_BIN"
     protocol: "openai_responses"
-    base_url: "https://api.wodex.ai/v1"

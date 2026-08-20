@@ -81,10 +81,10 @@ network:
 ```
 
 Every participant package also includes `03-runner/harnesses.yaml` with exactly
-two entries: `cc` (the `claude` executable, Wodex Anthropic compatibility) and
-`codex` (the `codex` executable, Wodex OpenAI Responses compatibility). Both
-use the runtime-only `WODEX_API_KEY`; CC is restricted to file/search tools and
-the runner creates a separate config and home directory for each roll.
+two entries: `cc` (the `claude` executable and Anthropic protocol) and `codex`
+(the `codex` executable and OpenAI Responses protocol). Credentials and base
+URLs come from the selected model entry. CC is restricted to file/search tools,
+and the runner creates a separate config and home directory for each roll.
 
 ## `models.yaml`
 
@@ -108,6 +108,7 @@ models:
     model_name: "provider/model-id"
     endpoint: "responses"
     credential_env: "PROVIDER_API_KEY"
+    supported_harnesses: ["codex"]
     profiles:
       - id: "default"
         parameters: {}
@@ -138,8 +139,8 @@ package root:
 ```
 
 The wrapper changes to the package root, explains the flow, prompts first for
-`cc` (Claude Code) or `codex`, then for one of the five models, requests the
-single `WODEX_API_KEY` with hidden input, and runs the default rollout count. An
+`cc` (Claude Code) or `codex`, then for one compatible canonical model, requests
+one selected-model API key with hidden input, and runs the default rollout count. An
 optional first argument changes the
 rollout count. Direct Python flags are advanced/CI interfaces. If no explicit
 result directory is supplied, the runner creates
@@ -169,8 +170,9 @@ Every participant-facing package MUST include this block with
 extra, or substituted IDs are invalid. It also rejects `REPLACE_WITH_*` values,
 provider/adapter/endpoint/credential mappings that differ from
 `examples/activity-models.yaml`, and participant profile or parameter
-overrides. The activity credential mode is fixed to `per_selected_model`, with
-every model mapped to the gateway credential `WODEX_API_KEY`. The lock is a task-package policy; a competition
+overrides. The activity credential mode is fixed to `per_selected_model`.
+Claude and GPT use Wodex, Qwen uses the organizer-provided Aliyun MaaS endpoint,
+Kimi uses Moonshot, and DeepSeek uses its official endpoint. The lock is a task-package policy; a competition
 distributor should also publish an artifact checksum or otherwise prevent
 participants from editing `models.yaml` after distribution.
 
@@ -258,10 +260,11 @@ an Agent can produce a plausible but validator-incompatible schema. The
 adapter must reject missing outputs or non-zero Agent exits before scoring.
 
 The default generated adapters are `03-runner/cc_agent.sh` and
-`03-runner/codex_agent.sh`. They receive the Wodex key at runtime, stage the
-complete contract in the isolated workspace, invoke only the selected CLI, and
-write declared outputs under `VERIFORGE_OUTPUT_DIR`. CC uses Wodex's Anthropic
-compatibility variables; Codex uses a per-roll Wodex Responses config. The
+`03-runner/codex_agent.sh`. They receive one provider-neutral runtime key, stage
+the complete contract in the isolated workspace, invoke only the selected CLI,
+and write declared outputs under `VERIFORGE_OUTPUT_DIR`. CC uses the selected
+model's approved Anthropic-compatible variables; Codex uses a per-roll
+Responses-compatible provider config. The
 participant runner invokes the selected harness and then
 `02-evaluation/scorer.py`. `provider_agent.py`, if present, is developer-only
 legacy code and is never the participant default.

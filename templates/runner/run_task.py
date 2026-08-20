@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Participant runner for one Wodex model and N isolated harness rollouts."""
+"""Participant runner for one approved model and N isolated harness rollouts."""
 
 from __future__ import annotations
 
@@ -30,28 +30,37 @@ FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
 ISOLATION_MANIFEST_VERSION = "veriforge-isolation-manifest/v1"
 CANONICAL_MODELS = {
     "kimi-k3": {
-        "provider": "wodex",
+        "provider": "moonshot",
         "adapter": "openai_chat",
         "model_name": "kimi-k3",
         "endpoint": "chat_completions",
-        "base_url": "https://api.wodex.ai/v1",
-        "credential_env": "WODEX_API_KEY",
+        "base_url": "https://api.moonshot.cn/v1",
+        "credential_env": "MOONSHOT_API_KEY",
+        "supported_harnesses": ["codex"],
+        "codex_model_provider": "moonshot",
+        "codex_base_url": "https://api.moonshot.cn/v1",
     },
     "deepseek-v4-pro": {
-        "provider": "wodex",
+        "provider": "deepseek",
         "adapter": "openai_chat",
         "model_name": "deepseek-v4-pro",
         "endpoint": "chat_completions",
-        "base_url": "https://api.wodex.ai/v1",
-        "credential_env": "WODEX_API_KEY",
+        "base_url": "https://api.deepseek.com",
+        "credential_env": "DEEPSEEK_API_KEY",
+        "supported_harnesses": ["codex"],
+        "codex_model_provider": "deepseek",
+        "codex_base_url": "https://api.deepseek.com",
     },
     "qwen3.8-max": {
-        "provider": "wodex",
+        "provider": "aliyun_maas",
         "adapter": "openai_chat",
         "model_name": "qwen3.8-max",
         "endpoint": "chat_completions",
-        "base_url": "https://api.wodex.ai/v1",
-        "credential_env": "WODEX_API_KEY",
+        "base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "credential_env": "DASHSCOPE_API_KEY",
+        "supported_harnesses": ["codex"],
+        "codex_model_provider": "aliyun_maas",
+        "codex_base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     },
     "claude-opus-5": {
         "provider": "wodex",
@@ -60,6 +69,7 @@ CANONICAL_MODELS = {
         "endpoint": "messages",
         "base_url": "https://api.wodex.ai",
         "credential_env": "WODEX_API_KEY",
+        "supported_harnesses": ["cc"],
     },
     "gpt-5.6-sol": {
         "provider": "wodex",
@@ -68,6 +78,9 @@ CANONICAL_MODELS = {
         "endpoint": "responses",
         "base_url": "https://api.wodex.ai/v1",
         "credential_env": "WODEX_API_KEY",
+        "supported_harnesses": ["codex"],
+        "codex_model_provider": "wodex",
+        "codex_base_url": "https://api.wodex.ai/v1",
     },
 }
 CANONICAL_MODEL_IDS = frozenset(CANONICAL_MODELS)
@@ -77,14 +90,12 @@ CANONICAL_HARNESSES = {
         "executable": "claude",
         "executable_env": "CLAUDE_BIN",
         "protocol": "anthropic",
-        "base_url": "https://api.wodex.ai",
     },
     "codex": {
         "display_name": "Codex CLI",
         "executable": "codex",
         "executable_env": "CODEX_BIN",
         "protocol": "openai_responses",
-        "base_url": "https://api.wodex.ai/v1",
     },
 }
 CANONICAL_HARNESS_IDS = frozenset(CANONICAL_HARNESSES)
@@ -204,6 +215,11 @@ def load_catalog(path: Path) -> dict:
                 raise ValueError(f"model {model_id}.{field} must equal the canonical matrix value")
             if isinstance(value, str) and PLACEHOLDER_MARKER in value:
                 raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
+        supported_harnesses = model.get("supported_harnesses")
+        if not isinstance(supported_harnesses, list) or not supported_harnesses:
+            raise ValueError(f"model {model_id} must declare supported_harnesses")
+        if not set(supported_harnesses).issubset(CANONICAL_HARNESS_IDS):
+            raise ValueError(f"model {model_id} declares an unapproved harness")
         profiles = model.get("profiles")
         if not isinstance(profiles, list) or len(profiles) != 1:
             raise ValueError(f"model {model_id} must declare exactly one profile")
@@ -228,8 +244,8 @@ def load_harness_catalog(path: Path) -> dict:
         raise ValueError(f"invalid YAML in {path}: {exc}") from exc
     if not isinstance(catalog, dict) or catalog.get("schema_version") != "veriforge-harness-matrix/v1":
         raise ValueError("harnesses.yaml must use veriforge-harness-matrix/v1")
-    if catalog.get("credential_env") != "WODEX_API_KEY":
-        raise ValueError("harnesses.yaml must use WODEX_API_KEY")
+    if catalog.get("credential_mode") != "per_selected_model":
+        raise ValueError("harnesses.yaml must use per_selected_model credentials")
     entries = catalog.get("harnesses")
     if not isinstance(entries, list) or len(entries) != len(CANONICAL_HARNESSES):
         raise ValueError("harnesses.yaml must contain exactly cc and codex")
@@ -244,7 +260,7 @@ def load_harness_catalog(path: Path) -> dict:
         canonical = CANONICAL_HARNESSES[harness_id]
         for field, expected in canonical.items():
             if entry.get(field) != expected:
-                raise ValueError(f"harness {harness_id}.{field} must equal the Wodex harness mapping")
+                raise ValueError(f"harness {harness_id}.{field} does not match the approved harness mapping")
     if seen != CANONICAL_HARNESS_IDS:
         raise ValueError("harnesses.yaml must contain exactly cc and codex")
     return catalog
@@ -419,13 +435,42 @@ def resolve_harnesses(catalog: dict, args: argparse.Namespace) -> list[dict]:
     return [by_id["codex"]]
 
 
+def find_harness_executable(harness: dict) -> str | None:
+    """Resolve an approved CLI, including the Codex binary bundled on macOS."""
+    executable_env = harness.get("executable_env", "")
+    override = os.environ.get(executable_env) if executable_env else None
+    if override and Path(override).is_file() and os.access(override, os.X_OK):
+        return override
+    discovered = shutil.which(harness.get("executable", ""))
+    if discovered:
+        return discovered
+    if harness.get("id") == "codex":
+        bundled = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            return str(bundled)
+    return None
+
+
 def resolve_models(catalog: dict, args: argparse.Namespace) -> list[dict]:
     models = catalog["models"]
-    by_id = {model["id"]: model for model in models}
+    all_by_id = {model["id"]: model for model in models}
+    by_id = dict(all_by_id)
+    selected_harness = getattr(args, "harness_id", None)
+    if selected_harness:
+        models = [
+            model
+            for model in models
+            if selected_harness in model.get("supported_harnesses", CANONICAL_HARNESS_IDS)
+        ]
+        by_id = {model["id"]: model for model in models}
+        if not models:
+            raise ValueError(f"selected harness has no compatible approved models: {selected_harness}")
     if args.preflight and not args.model and not args.interactive:
         return models
     if args.model:
         if args.model not in by_id:
+            if args.model in all_by_id and selected_harness:
+                raise ValueError(f"model {args.model} is not compatible with harness {selected_harness}")
             raise ValueError(f"model is not allowlisted: {args.model}")
         return [by_id[args.model]]
 
@@ -500,6 +545,9 @@ def build_environment(
     credential_env = model.get("credential_env")
     if credential_env and credential:
         env[credential_env] = credential
+        # Harness scripts consume one provider-neutral value. The provider
+        # variable is retained for task-specific adapters and diagnostics.
+        env["VERIFORGE_API_KEY"] = credential
     env.update(
         {
             "VERIFORGE_MODEL_ID": model["id"],
@@ -517,7 +565,7 @@ def build_environment(
             "VERIFORGE_PROVIDER_REQUEST_JSON": json.dumps(provider_request, sort_keys=True),
             "VERIFORGE_HARNESS_ID": str((harness or {}).get("id", "")),
             "VERIFORGE_HARNESS_PROTOCOL": str((harness or {}).get("protocol", "")),
-            "VERIFORGE_WODEX_BASE_URL": str((harness or {}).get("base_url", "https://api.wodex.ai")),
+            "VERIFORGE_API_BASE_URL": str(model.get("base_url", "")),
         }
     )
     if workspace is not None:
@@ -902,7 +950,19 @@ def main() -> int:
 
     harnesses = resolve_harnesses(harness_catalog, args)
     harness = harnesses[0]
-    args.harness_id = harness.get("id") if harness_path.is_file() else None
+    # A matrix-only preflight validates every harness; interactive and explicit
+    # runs select exactly one harness and can filter the model choices.
+    args.harness_id = harness.get("id") if harness_path.is_file() and len(harnesses) == 1 else None
+    if len(harnesses) == 1 and not args.dry_run:
+        executable = find_harness_executable(harness)
+        if not executable:
+            variable = harness.get("executable_env", "")
+            raise ValueError(
+                f"{harness.get('display_name', harness['id'])} CLI not found; "
+                f"install {harness.get('executable')} or set {variable}"
+            )
+        if harness.get("executable_env"):
+            os.environ[harness["executable_env"]] = executable
     models = resolve_models(catalog, args)
     args.task_spec = args.task_spec.resolve()
     if not args.task_spec.is_file():
@@ -929,9 +989,7 @@ def main() -> int:
         selected_for_check = bool(args.model or args.interactive)
         missing = check_credentials(models) if selected_for_check else []
         for entry in harnesses:
-            executable = entry.get("executable_env", "")
-            override = os.environ.get(executable)
-            found = override or shutil.which(entry.get("executable", ""))
+            found = find_harness_executable(entry)
             state = "ready" if found else "missing"
             print(f"{entry['id']}: harness {state} ({entry.get('executable')})")
         for model in models:
@@ -957,7 +1015,7 @@ def main() -> int:
         if not sys.stdin.isatty():
             raise ValueError(f"missing runtime credential: {credential_env}")
         credential = getpass.getpass(
-            f"请输入 {model.get('display_name', model['id'])} 的 API Key ({credential_env}): "
+            f"请输入 {model.get('display_name', model['id'])} 的 API Key（输入内容不会显示）: "
         )
         if not credential:
             raise ValueError("API Key cannot be empty")

@@ -67,10 +67,12 @@ model's parameters are organizer-provided and immutable. A local-only task is
 still shipped with all five models; local smoke tests select one of those five
 IDs rather than creating a single-model exception.
 
-All five model IDs use the organizer's Wodex gateway and the same runtime-only
-credential: `WODEX_API_KEY`. The selected harness translates that gateway into
-the Claude Messages or OpenAI Responses protocol; participants never enter a
-vendor-specific key or endpoint.
+The canonical matrix is mixed-provider: Claude and GPT use the organizer's
+Wodex gateway, Qwen uses the organizer-provided Aliyun MaaS endpoint, Kimi uses
+Moonshot, and DeepSeek uses its official endpoint. Provider URLs, credential
+variable names, and protocols are organizer-owned configuration. Participants
+still enter exactly one hidden API key for the selected model and never choose
+or configure a provider or endpoint.
 
 Every generated `models.yaml` MUST contain
 `organizer_controls.model_matrix_locked: true`,
@@ -83,8 +85,8 @@ allowed. The fixed profile parameters are exactly
 `reasoning_effort: max` and `max_output_tokens: 32768`; provider adapters map
 the normalized reasoning control to their native highest-effort setting.
 
-The participant workflow exposes harness selection, model selection, rollout
-count, and one runtime Wodex API key. The runner MUST validate the exact
+The participant workflow exposes harness selection, compatible model selection,
+rollout count, and one runtime API key. The runner MUST validate the exact
 canonical model ID set, the canonical provider/adapter/endpoint/base URL and
 credential environment mapping, the sole `default` profile, and the fixed
 parameters before accepting a package.
@@ -176,7 +178,7 @@ Rules:
 - Put a participant quick start immediately after the generated README's title
   and one-sentence task summary. Its first and primary command MUST be
   `./03-runner/run_benchmark.sh`; explain that it prompts for a harness, model,
-  and one Wodex API key, then runs and scores three rolls by default. Keep
+  and one API key for the selected model, then runs and scores three rolls by default. Keep
   explicit `python ... --model` commands in an advanced/CI section.
 - Keep task IDs and output paths identical across task, rubric, scorer, and
   runner.
@@ -238,14 +240,17 @@ The generated `cc_agent.sh` and `codex_agent.sh` are the participant harness
 adapters. They run from the isolated roll workspace, pass the complete task
 contract to the selected CLI, require the Agent to read the staged task spec
 and fixtures, and write declared outputs under `VERIFORGE_OUTPUT_DIR`. CC sets
-`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL` for Wodex.
-Codex creates a temporary `CODEX_HOME` with a Wodex OpenAI Responses provider
-and injects the key as `OPENAI_API_KEY`; it never reads the participant's global
-config. Both scripts fail clearly when their CLI is unavailable and propagate a
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL` from the
+selected model's approved configuration. Codex creates a temporary `CODEX_HOME`
+with the selected model's Responses-compatible provider and injects the key as
+`OPENAI_API_KEY`; it never reads the participant's global config. Both scripts
+fail clearly when their CLI is unavailable and propagate a
 non-zero exit code. CC must use its built-in file/search tool allowlist rather
-than `--dangerously-skip-permissions`; Codex must use `workspace-write` plus
-the CLI's supported automatic approval option (`--approve-for-me`) in the roll
-workspace. A package without both executable harness adapters is incomplete.
+than `--dangerously-skip-permissions`; Codex must use the CLI's supported
+automatic approval option (`--approve-for-me`), which supplies the
+`workspace-write` sandbox in the approved CLI version. Do not also pass an
+explicit `--sandbox` when that CLI version treats the options as mutually
+exclusive. A package without both executable harness adapters is incomplete.
 
 Any string field that the scorer compares exactly (for example, rationale
 codes, statuses, or category labels) must have a closed codebook in `task.yaml`
@@ -274,7 +279,7 @@ python 03-runner/run_task.py --interactive --rolls N
 ```
 
 The shell wrapper is the participant workflow. It must work regardless of the
-caller's current directory, print the four-step harness -> model -> Wodex key -> rollout flow before starting, and use
+caller's current directory, print the four-step harness -> compatible model -> API key -> rollout flow before starting, and use
 three rolls unless the participant supplies another allowed count as its first
 argument. The Python commands are advanced/CI interfaces, not the generated
 README's primary instructions.
@@ -305,9 +310,11 @@ bounded, secret-redacted diagnostic from both stdout and stderr; they must not
 redirect failures to `/dev/null`.
 
 When `--harness` is omitted in an interactive run, prompt from `harnesses.yaml`
-first. Then, when `--model` is omitted, prompt from the five canonical model
-entries in `models.yaml`. If `WODEX_API_KEY` is absent, prompt for it using
-hidden input. Do not display, persist, or log the key. Select the sole fixed `default` profile
+first. Then, when `--model` is omitted, prompt from the canonical model entries
+whose `supported_harnesses` include the selected harness. If the selected
+model's credential is absent, prompt once for its API key using hidden input.
+Do not expose the internal credential variable name or display, persist, or log
+the key. Select the sole fixed `default` profile
 automatically; never ask the participant to choose a profile or parameters.
 Reject unknown model IDs, missing/extra canonical models, alternate profiles,
 and arbitrary command-line hyperparameter overrides. A run selects exactly one
@@ -320,7 +327,7 @@ after scoring. Repeating the quick-start command must never collide with an
 earlier run's `roll-*` directories.
 
 `--preflight --harness HARNESS_ID --model MODEL_ID` checks the selected
-harness, model, and Wodex credential. `--preflight` without selections validates
+harness, model, and model-specific credential. `--preflight` without selections validates
 both harnesses and the complete model matrix; a missing runtime key is reported
 but is not fatal until a real rollout starts.
 
@@ -369,8 +376,8 @@ The participant receives the generated `verified` package and does not edit its
 status. Their workflow is only:
 
 ```text
-task idea -> task/evaluation package -> choose CC/Codex -> choose one model
-  -> enter Wodex API key -> choose N rolls -> invoke selected harness
+task idea -> task/evaluation package -> choose CC/Codex -> choose one compatible model
+  -> enter one API key -> choose N rolls -> invoke selected harness
   -> validate and score each roll
   -> inspect failure evidence -> refine the benchmark
 ```
@@ -398,8 +405,8 @@ an execution result; the top-level `benchmark_status` is always the literal
 - Do not start an Agent run if preflight reports a required `missing` dependency.
 - Do not expose an unapproved provider, model, profile, or hyperparameter
   override through the participant-facing runner.
-- Do not require vendor-specific credentials; all models use only the Wodex key
-  for the selected run, injected into the selected harness process.
+- Keep provider-specific credential names internal. Prompt for one selected-model
+  API key and inject only that value into the selected harness process.
 - Record runner dependencies such as PyYAML in
   `03-runner/dependency-manifest.yaml` and preflight them before execution.
 - Test the credential prompt, both `--agent-command` forms, roll progress
@@ -428,10 +435,11 @@ Verify:
 - scorer paths match the output paths;
 - model IDs, hyperparameters, roll limits, concurrency, retries, and result
   locations are recorded;
-- `models.yaml` contains exactly the five canonical IDs, exact Wodex provider/
-  adapter mappings, one `default` profile per model, and fixed parameters;
-- `harnesses.yaml` declares exactly `cc` and `codex`, with Wodex as the only
-  credential and network domain;
+- `models.yaml` contains exactly the five canonical IDs, exact mixed-provider
+  adapter/endpoint/credential mappings, one `default` profile per model, and
+  fixed parameters;
+- `harnesses.yaml` declares exactly `cc` and `codex`, with credentials selected
+  only from the chosen model entry;
 - interactive harness-then-model selection and allowlist rejection paths work;
 - the generated README leads with `./03-runner/run_benchmark.sh`, the wrapper
   is executable, and a repeated run receives a new result directory;
@@ -446,7 +454,7 @@ Verify:
 - each roll has an isolated workspace, output directory, logs, and scorer
   result, and the Agent cwd is that workspace;
 - the canonical fixed parameters are recorded without credentials and the
-  selected harness receives its Wodex-native configuration;
+  selected harness receives its approved provider configuration;
 - the reference answer passes and an alternate-key output fails deterministically;
 
 Report the task objective, fixed `verified` status, three artifact paths,
