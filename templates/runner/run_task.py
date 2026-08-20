@@ -16,6 +16,9 @@ from pathlib import Path
 import subprocess
 import sys
 import re
+import shutil
+import signal
+import stat
 from datetime import datetime, timezone
 
 try:
@@ -24,7 +27,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.5"
+RUNNER_VERSION = "veriforge-runner/v1.6"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
@@ -39,9 +42,9 @@ CANONICAL_MODELS = {
     },
     "deepseek-v4-pro": {
         "provider": "deepseek",
-        "adapter": "openai_responses",
+        "adapter": "openai_chat",
         "model_name": "deepseek-v4-pro",
-        "endpoint": "responses",
+        "endpoint": "chat_completions",
         "base_url": "https://api.deepseek.com",
         "credential_env": "DEEPSEEK_API_KEY",
     },
@@ -71,6 +74,34 @@ CANONICAL_MODELS = {
     },
 }
 CANONICAL_MODEL_IDS = frozenset(CANONICAL_MODELS)
+
+
+def _openai_responses_parameters(parameters: dict) -> dict:
+    return {
+        "reasoning": {"effort": parameters["reasoning_effort"]},
+        "max_output_tokens": parameters["max_output_tokens"],
+    }
+
+
+def _anthropic_messages_parameters(parameters: dict) -> dict:
+    return {
+        "output_config": {"effort": parameters["reasoning_effort"]},
+        "max_tokens": parameters["max_output_tokens"],
+    }
+
+
+def _openai_chat_parameters(parameters: dict) -> dict:
+    return {
+        "reasoning_effort": parameters["reasoning_effort"],
+        "max_tokens": parameters["max_output_tokens"],
+    }
+
+
+PROVIDER_ADAPTERS = {
+    "openai_responses": _openai_responses_parameters,
+    "anthropic_messages": _anthropic_messages_parameters,
+    "openai_chat": _openai_chat_parameters,
+}
 
 
 def utc_now() -> str:
@@ -235,8 +266,43 @@ def check_credentials(models: list[dict]) -> list[str]:
     return missing
 
 
-def build_environment(model: dict, profile: dict, credential: str | None, task_spec: Path) -> dict[str, str]:
-    """Pass only the selected credential and VeriForge metadata to the child."""
+def build_provider_parameters(model: dict, profile: dict) -> dict:
+    """Translate canonical profile parameters into the provider wire format."""
+    adapter_name = model.get("adapter")
+    adapter = PROVIDER_ADAPTERS.get(adapter_name)
+    if adapter is None:
+        raise ValueError(f"no provider adapter is registered for {adapter_name!r}")
+    parameters = profile.get("parameters", {})
+    if parameters != FIXED_PARAMETERS:
+        raise ValueError("provider adapters only accept the fixed canonical parameters")
+    return adapter(parameters)
+
+
+def build_provider_request(model: dict, profile: dict) -> dict:
+    """Return a serializable request fragment for task-specific adapters."""
+    return {
+        "provider": model["provider"],
+        "adapter": model["adapter"],
+        "endpoint": model["endpoint"],
+        "base_url": model["base_url"],
+        "model": model["model_name"],
+        "parameters": build_provider_parameters(model, profile),
+    }
+
+
+def build_environment(
+    model: dict,
+    profile: dict,
+    credential: str | None,
+    task_spec: Path,
+    *,
+    workspace: Path | None = None,
+    output_dir: Path | None = None,
+    roll_dir: Path | None = None,
+) -> dict[str, str]:
+    """Build a minimal child environment with explicit provider and roll paths."""
+    native_parameters = build_provider_parameters(model, profile)
+    provider_request = build_provider_request(model, profile)
     env = {"PATH": os.environ.get("PATH", "")}
     if os.environ.get("CODEX_BIN"):
         env["CODEX_BIN"] = os.environ["CODEX_BIN"]
@@ -256,8 +322,21 @@ def build_environment(model: dict, profile: dict, credential: str | None, task_s
             "VERIFORGE_TASK_SPEC": str(task_spec),
             "VERIFORGE_PROFILE_ID": profile["id"],
             "VERIFORGE_PARAMETERS_JSON": json.dumps(profile.get("parameters", {}), sort_keys=True),
+            "VERIFORGE_NATIVE_PARAMETERS_JSON": json.dumps(native_parameters, sort_keys=True),
+            "VERIFORGE_PROVIDER_REQUEST_JSON": json.dumps(provider_request, sort_keys=True),
         }
     )
+    if workspace is not None:
+        workspace = workspace.resolve()
+        env["VERIFORGE_WORKSPACE"] = str(workspace)
+        env["PWD"] = str(workspace)
+        env["HOME"] = str((roll_dir or workspace) / "home")
+        env["XDG_CONFIG_HOME"] = str((roll_dir or workspace) / "config")
+        env["XDG_CACHE_HOME"] = str((roll_dir or workspace) / "cache")
+    if output_dir is not None:
+        env["VERIFORGE_OUTPUT_DIR"] = str(output_dir.resolve())
+    if roll_dir is not None:
+        env["VERIFORGE_ROLL_DIR"] = str(roll_dir.resolve())
     return env
 
 
@@ -267,6 +346,88 @@ def redact_diagnostic(text: str, credential: str | None) -> str:
         text = text.replace(credential, "<redacted>")
     text = SECRET_VALUE_PATTERN.sub(lambda match: match.group(1) + "=<redacted>", text)
     return text.strip()[-2000:]
+
+
+def infer_workspace_source(task_spec: Path) -> Path:
+    """Find the generated package root without assuming the caller's cwd."""
+    for candidate in (task_spec.parent, *task_spec.parents):
+        if (candidate / "01-task").is_dir() and (candidate / "03-runner" / "models.yaml").is_file():
+            return candidate
+    return task_spec.parent
+
+
+def stage_workspace(source: Path, workspace: Path, task_spec: Path) -> Path:
+    """Copy a clean package into a roll workspace and protect the task spec."""
+    source = source.resolve()
+    workspace = workspace.resolve()
+    if not source.is_dir():
+        raise ValueError(f"workspace source is not a directory: {source}")
+    try:
+        relative_spec = task_spec.resolve().relative_to(source)
+    except ValueError:
+        relative_spec = Path("task.yaml")
+
+    def ignore_generated(_path: str, names: list[str]) -> set[str]:
+        return {name for name in names if name in {"results", ".git", "__pycache__", ".pytest_cache"}}
+
+    shutil.copytree(source, workspace, ignore=ignore_generated)
+    staged_spec = workspace / relative_spec
+    if not staged_spec.is_file():
+        staged_spec.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(task_spec, staged_spec)
+    staged_spec.chmod(staged_spec.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    return staged_spec
+
+
+def _as_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def redact_text(text: str, credential: str | None) -> str:
+    """Redact a complete log while retaining enough context for diagnosis."""
+    if credential:
+        text = text.replace(credential, "<redacted>")
+    return SECRET_VALUE_PATTERN.sub(lambda match: match.group(1) + "=<redacted>", text)
+
+
+def write_redacted_log(path: Path, text: str | bytes | None, credential: str | None) -> None:
+    path.write_text(redact_text(_as_text(text), credential), encoding="utf-8")
+
+
+def run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int | float | None,
+) -> tuple[int, str, str, bool]:
+    """Run one command and terminate its process group on timeout."""
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return process.returncode, stdout or "", stderr or "", False
+    except subprocess.TimeoutExpired as exc:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Windows is not the supported local harness
+            process.kill()
+        stdout, stderr = process.communicate()
+        return 124, _as_text(exc.stdout) + _as_text(stdout), _as_text(exc.stderr) + _as_text(stderr), True
 
 
 def run_roll(
@@ -280,64 +441,144 @@ def run_roll(
 ) -> dict:
     started = utc_now()
     command = args.agent_command
+    if not command and not args.dry_run:
+        raise ValueError("an agent command is required unless --dry-run is used")
+
+    roll_dir = args.results_dir.resolve() / f"roll-{index}"
+    workspace = roll_dir / "workspace"
+    output_dir = workspace / "outputs"
+    logs_dir = roll_dir / "logs"
+    scorer_result_path = roll_dir / "scorer-result.json"
+    roll_dir.mkdir(parents=True, exist_ok=False)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    for private_dir in (roll_dir / "home", roll_dir / "config", roll_dir / "cache"):
+        private_dir.mkdir(parents=True, exist_ok=True)
+
+    staged_spec = stage_workspace(args.workspace_source, workspace, args.task_spec)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    native_parameters = build_provider_parameters(model, profile)
+    provider_request = build_provider_request(model, profile)
     record = {
         "task_id": args.task_id,
         "model_id": model["id"],
         "model_name": model["model_name"],
+        "provider": model["provider"],
+        "adapter": model["adapter"],
         "profile_id": profile["id"],
         "parameters": profile.get("parameters", {}),
+        "native_parameters": native_parameters,
+        "provider_request": provider_request,
         "roll": index,
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
         "task_spec_hash": task_spec_digest,
         "benchmark_status": "verified",
         "started_at": started,
+        "roll_dir": str(roll_dir),
+        "workspace": str(workspace),
+        "task_spec": str(staged_spec),
+        "output_dir": str(output_dir),
+        "scorer_result": str(scorer_result_path),
         "status": "dry_run" if args.dry_run else "pending",
     }
     if args.dry_run:
+        scorer_result_path.write_text(
+            json.dumps({"status": "not_run", "reason": "dry_run"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
         record["ended_at"] = utc_now()
         return record
-    if not command:
-        raise ValueError("an agent command is required unless --dry-run is used")
 
-    print(f"[veriforge] roll {index}/{args.rolls}: starting agent", flush=True)
+    env = build_environment(
+        model,
+        profile,
+        credential,
+        staged_spec,
+        workspace=workspace,
+        output_dir=output_dir,
+        roll_dir=roll_dir,
+    )
+    env["VERIFORGE_SCORER_RESULT"] = str(roll_dir / "scorer-result.json")
+    print(f"[veriforge] roll {index}/{args.rolls}: starting agent in {workspace}", flush=True)
     try:
-        completed = subprocess.run(
+        returncode, stdout, stderr, timed_out = run_command(
             command,
-            env=build_environment(model, profile, credential, args.task_spec),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+            cwd=workspace,
+            env=env,
             timeout=profile.get("timeout_seconds"),
         )
-    except subprocess.TimeoutExpired:
-        record["returncode"] = 124
-        record["status"] = "failed"
-        record["timeout_seconds"] = profile.get("timeout_seconds")
-        record["ended_at"] = utc_now()
-        print(
-            f"[veriforge] roll {index}/{args.rolls}: agent timed out after {profile.get('timeout_seconds')}s",
-            flush=True,
-        )
-        return record
     except OSError as exc:
-        record["returncode"] = 127
-        record["status"] = "failed"
-        record["ended_at"] = utc_now()
-        print(f"[veriforge] roll {index}/{args.rolls}: could not start agent: {exc}", flush=True)
-        return record
-    record["returncode"] = completed.returncode
-    record["status"] = "passed" if completed.returncode == 0 else "failed"
-    if completed.returncode != 0:
-        for stream_name, stream in (("stdout", completed.stdout), ("stderr", completed.stderr)):
+        returncode, stdout, stderr, timed_out = 127, "", str(exc), False
+
+    write_redacted_log(logs_dir / "agent.stdout.log", stdout, credential)
+    write_redacted_log(logs_dir / "agent.stderr.log", stderr, credential)
+    record["agent_stdout_log"] = str(logs_dir / "agent.stdout.log")
+    record["agent_stderr_log"] = str(logs_dir / "agent.stderr.log")
+    record["returncode"] = returncode
+    record["status"] = "failed" if returncode != 0 else "passed"
+    if timed_out:
+        record["timeout_seconds"] = profile.get("timeout_seconds")
+    if returncode != 0:
+        for stream_name, stream in (("stdout", stdout), ("stderr", stderr)):
             diagnostic = redact_diagnostic(stream or "", credential)
             if diagnostic:
                 record[f"agent_{stream_name}_tail"] = diagnostic
                 print(f"[veriforge] agent {stream_name}: {diagnostic}", file=sys.stderr, flush=True)
-        print(f"[veriforge] roll {index}/{args.rolls}: agent failed (exit {completed.returncode})", flush=True)
+        print(f"[veriforge] roll {index}/{args.rolls}: agent failed (exit {returncode})", flush=True)
     else:
         print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
+
+    scorer_command = getattr(args, "scorer_command", None)
+    if scorer_command and returncode == 0:
+        print(f"[veriforge] roll {index}/{args.rolls}: scoring", flush=True)
+        try:
+            scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = run_command(
+                scorer_command,
+                cwd=workspace,
+                env=env,
+                timeout=profile.get("timeout_seconds"),
+            )
+        except OSError as exc:
+            scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = 127, "", str(exc), False
+        write_redacted_log(logs_dir / "scorer.stdout.log", scorer_stdout, credential)
+        write_redacted_log(logs_dir / "scorer.stderr.log", scorer_stderr, credential)
+        if not scorer_result_path.exists():
+            scorer_result_path.write_text(
+                json.dumps(
+                    {
+                        "status": "failed" if scorer_returncode else "passed",
+                        "returncode": scorer_returncode,
+                        "timed_out": scorer_timed_out,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        else:
+            scorer_result_path.write_text(
+                redact_text(scorer_result_path.read_text(encoding="utf-8"), credential),
+                encoding="utf-8",
+            )
+        record["scorer_status"] = "failed" if scorer_returncode else "passed"
+        record["scorer_returncode"] = scorer_returncode
+        record["scorer_stdout_log"] = str(logs_dir / "scorer.stdout.log")
+        record["scorer_stderr_log"] = str(logs_dir / "scorer.stderr.log")
+        if scorer_returncode != 0:
+            record["status"] = "failed"
+    else:
+        record["scorer_status"] = "not_configured" if not scorer_command else "skipped_agent_failed"
+        scorer_result_path.write_text(
+            json.dumps(
+                {
+                    "status": record["scorer_status"],
+                    "reason": "scorer command was not run",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     record["ended_at"] = utc_now()
     return record
 
@@ -353,6 +594,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument("--task-spec", type=Path, default=Path("01-task/task.yaml"))
+    parser.add_argument(
+        "--workspace-source",
+        type=Path,
+        help="clean task package to copy for every roll (defaults to the generated package root)",
+    )
+    parser.add_argument(
+        "--scorer-command",
+        nargs="+",
+        help="optional scorer command; it runs in each roll workspace after a successful agent",
+    )
     parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
     # Accept both ``--agent-command command`` and the conventional
     # ``--agent-command -- command`` form used in shell examples.
@@ -386,6 +637,9 @@ def main() -> int:
             return 2
         raise ValueError(f"task spec not found: {args.task_spec}")
     validate_task_spec(args.task_spec)
+    args.workspace_source = (args.workspace_source or infer_workspace_source(args.task_spec)).resolve()
+    if not args.workspace_source.is_dir():
+        raise ValueError(f"workspace source not found: {args.workspace_source}")
     if args.preflight:
         # Credential mode is per_selected_model. A matrix-only preflight may
         # report all five variables, but only an explicitly selected model can
@@ -416,6 +670,13 @@ def main() -> int:
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
+    args.results_dir = args.results_dir.resolve()
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = args.results_dir / "run-manifest.json"
+    if not args.dry_run and manifest_path.exists():
+        raise ValueError(f"results directory already contains a run manifest: {manifest_path}")
+    if not args.dry_run and any(args.results_dir.glob("roll-*")):
+        raise ValueError(f"results directory already contains roll artifacts: {args.results_dir}")
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
@@ -431,8 +692,7 @@ def main() -> int:
             )
         )
 
-    args.results_dir.mkdir(parents=True, exist_ok=True)
-    output = args.results_dir / "run-manifest.json"
+    output = manifest_path
     output.write_text(
         json.dumps(
             {

@@ -95,9 +95,9 @@ models:
   - id: "deepseek-v4-pro"
     display_name: "DeepSeek V4 Pro"
     provider: "deepseek"
-    adapter: "openai_responses"
+    adapter: "openai_chat"
     model_name: "deepseek-v4-pro"
-    endpoint: "responses"
+    endpoint: "chat_completions"
     base_url: "https://api.deepseek.com"
     credential_env: "DEEPSEEK_API_KEY"
     profiles:

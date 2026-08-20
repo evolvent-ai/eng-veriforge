@@ -245,6 +245,13 @@ python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-run
 python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
 ```
 
+The runner accepts `--workspace-source PATH` when the clean fixture/package
+source is not the generated package root, and `--scorer-command ...` for an
+optional scorer. The scorer runs in the same isolated roll workspace and gets
+`VERIFORGE_SCORER_RESULT` pointing to that roll's result file. Keep
+`--scorer-command` before `--agent-command`, because the latter consumes the
+remaining command-line tokens.
+
 The runner must print a non-secret progress message when each roll starts and
 finishes, report a bounded failure diagnostic, and enforce the profile's
 `timeout_seconds`. Redirecting all child output and leaving the participant
@@ -275,11 +282,24 @@ for a skill revision after a standard test set is available.
 
 Adapters receive the selected fixed profile through `VERIFORGE_PARAMETERS_JSON`
 and the selected model's `VERIFORGE_ADAPTER`, `VERIFORGE_ENDPOINT`, and
-`VERIFORGE_BASE_URL` environment variables. If a Codex adapter needs a non-default
-provider, declare the non-secret
-`codex_model_provider` and `codex_base_url` in the selected model entry and
-pass them as explicit temporary config overrides. Do not load the participant's
-global Codex config into the harness.
+`VERIFORGE_BASE_URL` environment variables. The runner MUST resolve the
+canonical profile through a provider adapter and expose the resulting native
+request fragment in `VERIFORGE_NATIVE_PARAMETERS_JSON` and
+`VERIFORGE_PROVIDER_REQUEST_JSON`; adapters must pass that fragment to the
+provider rather than forwarding the canonical keys verbatim. The built-in
+mapping is:
+
+| Adapter | Native reasoning field | Native output-limit field |
+| --- | --- | --- |
+| `openai_responses` | `reasoning.effort` | `max_output_tokens` |
+| `anthropic_messages` | `output_config.effort` | `max_tokens` |
+| `openai_chat` | `reasoning_effort` | `max_tokens` |
+
+An adapter must fail closed when its name is not registered or when the fixed
+canonical profile is changed. If a Codex adapter needs a non-default provider,
+declare the non-secret `codex_model_provider` and `codex_base_url` in the
+selected model entry and pass them as explicit temporary config overrides. Do
+not load the participant's global Codex config into the harness.
 
 When a required API key is absent, ask for its value only at runtime using
 hidden input, or report the missing variable in non-interactive mode. Inject it
@@ -316,6 +336,10 @@ an execution result; the top-level `benchmark_status` is always the literal
   accounts automatically.
 - Do not expose global MCP/Skill configuration, the user's home directory, or
   unrestricted network to a harness session.
+- Use a clean package source to create a new workspace for every roll. Run the
+  Agent with that workspace as its cwd, and give each roll its own output,
+  logs, scorer result, HOME, config directory, and cache directory. Never copy
+  one roll's workspace into another roll.
 - Use read-only mounts for fixtures and a per-run output directory.
 - Block tasks that require real destructive or irreversible side effects unless
   the user provides an isolated test account and an explicit rollback plan.
@@ -331,6 +355,11 @@ an execution result; the top-level `benchmark_status` is always the literal
   messages, timeout handling, and a missing-command failure before handoff.
 - Test that `VERIFORGE_TASK_SPEC` reaches the adapter, the adapter stages the
   spec read-only, and the Agent prompt uses the validator's exact output keys.
+- Test that two rolls have different workspaces and that the second roll does
+  not see files created by the first; retain full secret-redacted stdout/stderr
+  logs under each roll directory.
+- Test every provider adapter's canonical-to-native parameter mapping and
+  record the resolved native request in the roll manifest.
 - Run the reference-answer and malformed-output schema smoke tests before
   treating an adapter rollout as evidence.
 
@@ -357,6 +386,10 @@ Verify:
 - the adapter stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
 - every exact-match string field has a public codebook in the task spec;
 - each roll records the task spec hash alongside the model and scorer hashes;
+- each roll has an isolated workspace, output directory, logs, and scorer
+  result, and the Agent cwd is that workspace;
+- the canonical fixed parameters are converted to the selected provider's
+  native request fields and recorded without credentials;
 - the reference answer passes and an alternate-key output fails deterministically;
 
 Report the task objective, fixed `verified` status, three artifact paths,

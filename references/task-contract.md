@@ -98,6 +98,7 @@ models:
   - id: "model-id"
     display_name: "Human readable name"
     provider: "provider-name"
+    adapter: "openai_responses"
     model_name: "provider/model-id"
     endpoint: "responses"
     credential_env: "PROVIDER_API_KEY"
@@ -171,10 +172,28 @@ evaluating a standard test set.
 ## Run manifest
 
 Each roll must record task ID/version, fixed `benchmark_status: verified`,
-selected model ID, fixed profile ID, fixed parameters, roll count and roll
-number, start/end timestamps, runner version, harness allowlist hash, task spec
-hash, scorer version, execution status, score, and output paths. It must not
-contain secret values or credential environment variable values.
+selected model ID, provider and adapter, fixed canonical parameters, the
+provider-native parameter fragment, roll count and roll number, start/end
+timestamps, runner version, harness allowlist hash, task spec hash, scorer
+version, execution status, score, and output paths. It must also record unique
+paths for the roll workspace, output directory, stdout/stderr logs, and scorer
+result. It must not contain secret values or credential environment variable
+values.
+
+The canonical profile is translated before the Agent adapter runs. The built-in
+provider mappings are:
+
+| Adapter | Native reasoning field | Native output-limit field |
+| --- | --- | --- |
+| `openai_responses` | `reasoning.effort` | `max_output_tokens` |
+| `anthropic_messages` | `output_config.effort` | `max_tokens` |
+| `openai_chat` | `reasoning_effort` | `max_tokens` |
+
+The translated fragment is exposed as `VERIFORGE_NATIVE_PARAMETERS_JSON` and
+the complete non-secret request metadata as
+`VERIFORGE_PROVIDER_REQUEST_JSON`. An adapter must not forward
+`reasoning_effort` and `max_output_tokens` directly when the selected provider
+uses another field shape.
 
 ## Adapter and output-contract handoff
 

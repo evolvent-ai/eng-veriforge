@@ -83,6 +83,20 @@ runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 pro
 中声明非敏感的 `codex_model_provider` 和 `codex_base_url`，由 adapter 注入
 临时配置，不能加载参与者的全局 Codex 配置。
 
+每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
+Agent 的 cwd；`outputs`、stdout/stderr 日志、scorer result、HOME、配置和
+缓存目录也都按 roll 分开。前一个 roll 在 workspace 中创建或修改的文件
+不会进入后一个 roll。若 source 不是默认生成包根目录，可显式传入
+`--workspace-source PATH`。可选的 `--scorer-command` 会在每个 roll 的
+workspace 中执行，并通过 `VERIFORGE_SCORER_RESULT` 接收该 roll 的结果路径。
+
+固定 profile 的统一参数不会直接冒充厂商参数。runner 内置 provider
+adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON`
+和 `VERIFORGE_PROVIDER_REQUEST_JSON`：OpenAI Responses 使用
+`reasoning.effort`/`max_output_tokens`，Anthropic 使用
+`output_config.effort`/`max_tokens`，Kimi、Qwen、DeepSeek Chat 使用
+`reasoning_effort`/`max_tokens`。任务 adapter 必须使用转换后的字段。
+
 runner 会把任务定义文件的绝对路径通过 `VERIFORGE_TASK_SPEC` 传给 adapter。
 adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文件，并在 prompt
 中明确列出 validator 要求的精确字段名、枚举、证据引用格式和 Markdown
