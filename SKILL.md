@@ -243,9 +243,9 @@ Codex creates a temporary `CODEX_HOME` with a Wodex OpenAI Responses provider
 and injects the key as `OPENAI_API_KEY`; it never reads the participant's global
 config. Both scripts fail clearly when their CLI is unavailable and propagate a
 non-zero exit code. CC must use its built-in file/search tool allowlist rather
-than `--dangerously-skip-permissions`; Codex must use `workspace-write` in the
-roll workspace. A package without both executable harness adapters is
-incomplete.
+than `--dangerously-skip-permissions`; Codex must use `workspace-write` plus
+the CLI's supported automatic approval option (`--approve-for-me`) in the roll
+workspace. A package without both executable harness adapters is incomplete.
 
 Any string field that the scorer compares exactly (for example, rationale
 codes, statuses, or category labels) must have a closed codebook in `task.yaml`

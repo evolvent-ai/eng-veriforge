@@ -74,5 +74,5 @@ exec "$codex_bin" exec \
   --cd "$PWD" \
   --model "$VERIFORGE_MODEL_NAME" \
   --sandbox workspace-write \
-  --ask-for-approval never \
+  --approve-for-me \
   - < "$prompt_file"
