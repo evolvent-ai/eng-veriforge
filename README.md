@@ -37,6 +37,17 @@ python 03-runner/run_task.py \
   --rolls 3
 ```
 
+任务如果提供 Agent adapter，可以直接传入命令；下面两种分隔符写法等价：
+
+```bash
+python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
+python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
+```
+
+runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 profile 中的
+`timeout_seconds` 限制单次 Agent 运行。API Key 仍只在运行时隐藏输入或从
+环境变量读取，绝不会写入配置、manifest 或错误日志。
+
 参赛者只能选择 `models.yaml` 中声明的模型，不能通过命令行临时覆盖
 temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的
 API Key 环境变量不存在，runner 会用隐藏输入提示输入 Key；Key 只注入

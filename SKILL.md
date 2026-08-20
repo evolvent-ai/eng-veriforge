@@ -169,6 +169,19 @@ python 03-runner/run_task.py --model MODEL_ID --rolls N
 python 03-runner/run_task.py --interactive --rolls N
 ```
 
+If a task exposes an adapter command, both of these forms are valid and must
+behave identically:
+
+```bash
+python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
+python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
+```
+
+The runner must print a non-secret lifecycle message when each roll starts and
+finishes, report a bounded failure diagnostic, and enforce the profile's
+`timeout_seconds`. Redirecting all child output and leaving the participant
+with no progress signal is not an acceptable runner UX.
+
 When `--model` is omitted, prompt from the allowlisted model entries in
 `models.yaml`. After model selection, if its credential environment variable
 is absent, prompt for the API key using hidden input. Do not display, persist,
@@ -220,6 +233,8 @@ the run manifest. The task status (`concept`, `prototype`, `verified`, or
   override through the participant-facing runner.
 - Record runner dependencies such as PyYAML in
   `03-runner/dependency-manifest.yaml` and preflight them before execution.
+- Test the credential prompt, both `--agent-command` forms, roll lifecycle
+  messages, timeout handling, and a missing-command failure before handoff.
 
 ## Self-check before handoff
 

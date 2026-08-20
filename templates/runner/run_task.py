@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import re
 from datetime import datetime, timezone
 
 try:
@@ -23,7 +24,8 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1"
+RUNNER_VERSION = "veriforge-runner/v1.1"
+SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 
 
 def utc_now() -> str:
@@ -164,6 +166,14 @@ def build_environment(model: dict, profile: dict, credential: str | None) -> dic
     return env
 
 
+def redact_diagnostic(text: str, credential: str | None) -> str:
+    """Keep failure diagnostics useful without persisting or echoing a key."""
+    if credential:
+        text = text.replace(credential, "<redacted>")
+    text = SECRET_VALUE_PATTERN.sub(lambda match: match.group(1) + "=<redacted>", text)
+    return text.strip()[-2000:]
+
+
 def run_roll(
     model: dict,
     profile: dict,
@@ -192,9 +202,42 @@ def run_roll(
     if not command:
         raise ValueError("an agent command is required unless --dry-run is used")
 
-    completed = subprocess.run(command, env=build_environment(model, profile, credential), check=False)
+    print(f"[veriforge] roll {index}/{args.rolls}: starting agent", flush=True)
+    try:
+        completed = subprocess.run(
+            command,
+            env=build_environment(model, profile, credential),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=profile.get("timeout_seconds"),
+        )
+    except subprocess.TimeoutExpired:
+        record["returncode"] = 124
+        record["status"] = "failed"
+        record["timeout_seconds"] = profile.get("timeout_seconds")
+        record["ended_at"] = utc_now()
+        print(
+            f"[veriforge] roll {index}/{args.rolls}: agent timed out after {profile.get('timeout_seconds')}s",
+            flush=True,
+        )
+        return record
+    except OSError as exc:
+        record["returncode"] = 127
+        record["status"] = "failed"
+        record["ended_at"] = utc_now()
+        print(f"[veriforge] roll {index}/{args.rolls}: could not start agent: {exc}", flush=True)
+        return record
     record["returncode"] = completed.returncode
     record["status"] = "passed" if completed.returncode == 0 else "failed"
+    if completed.returncode != 0:
+        diagnostic = redact_diagnostic(completed.stderr or "", credential)
+        if diagnostic:
+            print(f"[veriforge] agent diagnostic: {diagnostic}", file=sys.stderr, flush=True)
+        print(f"[veriforge] roll {index}/{args.rolls}: agent failed (exit {completed.returncode})", flush=True)
+    else:
+        print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
     record["ended_at"] = utc_now()
     return record
 
@@ -210,7 +253,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
+    # Accept both ``--agent-command command`` and the conventional
+    # ``--agent-command -- command`` form used in shell examples.
+    argv = sys.argv[1:]
+    if "--agent-command" in argv:
+        command_index = argv.index("--agent-command")
+        if command_index + 1 < len(argv) and argv[command_index + 1] == "--":
+            argv.pop(command_index + 1)
+    args = parser.parse_args(argv)
     if args.agent_command and args.agent_command[0] == "--":
         args.agent_command = args.agent_command[1:]
     return args
