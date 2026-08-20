@@ -19,7 +19,7 @@ selection:
   fixed_profile: default
 
 # Replace every REPLACE_WITH_* value with the organizer's verified provider config
-# before moving a task beyond concept/prototype.
+# before publishing an activity package. Participants must not edit this matrix.
 models:
   - id: "claude-opus-5"
     display_name: "Claude Opus 5"

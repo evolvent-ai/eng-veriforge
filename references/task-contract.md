@@ -7,6 +7,9 @@ schema_version: "veriforge-task/v1"
 task_id: "example-task-v1"
 title: "A measurable Agent task"
 status: concept # concept | prototype | verified | blocked
+release:
+  target: authoring # authoring | activity
+  ready_for_activity: false
 execution_mode: local_only
 objective: "What the Agent must accomplish"
 agent_instructions: "Task instructions shown to the Agent"
@@ -34,12 +37,13 @@ lifecycle:
 known_limitations: []
 ```
 
-`status` is the benchmark package lifecycle state. It is intentionally separate
-from scoring: `acceptance.minimum_score` is the pass threshold for one Agent
-submission, not a promotion threshold. A package may be `verified` when a model
-scores below the task pass threshold, provided the deterministic assets,
-isolation, and reproducibility checks are complete. Conversely, a high score on
-one rollout does not promote a `concept` package.
+`status` is organizer-only authoring/release metadata, not a participant
+workflow. For an activity distribution, set `release.target: activity`,
+`release.ready_for_activity: true`, and `status: verified` only after the
+deterministic package, dependency, isolation, and reproducibility checks pass.
+`acceptance.minimum_score` is the pass threshold for one Agent submission, not
+a release threshold. A released package may produce low model scores, and a
+high score on one rollout does not release a `concept` package.
 
 Recommended `lifecycle` checks are:
 
@@ -49,6 +53,9 @@ Recommended `lifecycle` checks are:
   isolation and fixture-integrity checks pass, and an end-to-end rollout emits a
   reproducible manifest and scorer result. The numeric result may be pass or
   fail.
+
+Participants receive only the resulting activity package and must not edit
+`status` or `release` fields.
 
 ## `rubric.yaml`
 

@@ -131,8 +131,8 @@ def catalog_hash(catalog: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def load_task_lifecycle_status(path: Path) -> str:
-    """Read package lifecycle state; never derive it from a model score."""
+def load_task_metadata(path: Path) -> dict[str, object]:
+    """Read organizer release metadata; never derive it from a model score."""
     try:
         task = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -142,7 +142,16 @@ def load_task_lifecycle_status(path: Path) -> str:
     status = task.get("status", "concept")
     if status not in {"concept", "prototype", "verified", "blocked"}:
         raise ValueError(f"invalid task lifecycle status: {status}")
-    return status
+    release = task.get("release", {})
+    if not isinstance(release, dict):
+        raise ValueError("task release must contain a mapping")
+    target = release.get("target", "authoring")
+    ready = release.get("ready_for_activity", False)
+    if target not in {"authoring", "activity"}:
+        raise ValueError(f"invalid task release target: {target}")
+    if target == "activity" and (status != "verified" or ready is not True):
+        raise ValueError("activity release requires status=verified and release.ready_for_activity=true")
+    return {"status": status, "target": target, "ready": ready is True}
 
 
 def choose_index(items: list[tuple[str, str]], label: str) -> str:
@@ -233,6 +242,8 @@ def run_roll(
     config_digest: str,
     task_spec_digest: str,
     task_lifecycle_status: str,
+    release_target: str,
+    activity_release_ready: bool,
 ) -> dict:
     started = utc_now()
     command = args.agent_command
@@ -247,6 +258,8 @@ def run_roll(
         "models_hash": config_digest,
         "task_spec_hash": task_spec_digest,
         "task_lifecycle_status": task_lifecycle_status,
+        "release_target": release_target,
+        "activity_release_ready": activity_release_ready,
         "status_scope": "roll",
         "started_at": started,
         "status": "dry_run" if args.dry_run else "pending",
@@ -340,6 +353,7 @@ def main() -> int:
             print(f"task spec not found: {args.task_spec}", file=sys.stderr)
             return 2
         raise ValueError(f"task spec not found: {args.task_spec}")
+    task_metadata = load_task_metadata(args.task_spec)
     if args.preflight:
         missing = check_credentials(models)
         for model in models:
@@ -366,7 +380,9 @@ def main() -> int:
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
-    task_lifecycle_status = load_task_lifecycle_status(args.task_spec)
+    task_lifecycle_status = str(task_metadata["status"])
+    release_target = str(task_metadata["target"])
+    activity_release_ready = bool(task_metadata["ready"])
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
@@ -380,6 +396,8 @@ def main() -> int:
                 digest,
                 task_spec_digest,
                 task_lifecycle_status,
+                release_target,
+                activity_release_ready,
             )
         )
 
@@ -390,6 +408,8 @@ def main() -> int:
             {
                 "task_id": args.task_id,
                 "task_lifecycle_status": task_lifecycle_status,
+                "release_target": release_target,
+                "activity_release_ready": activity_release_ready,
                 "status_scope": "rolls",
                 "runs": records,
             },

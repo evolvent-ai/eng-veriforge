@@ -27,20 +27,21 @@ artifacts in one task directory:
 This skill is local-first. It does not upload ZIPs, create Harbor jobs, or run
 cloud tasks in the MVP.
 
-## Task states
+## Authoring states and activity release
 
-Use one of these states in `task.yaml`:
+Use these states only as organizer/authoring metadata in `task.yaml`:
 
 - `concept`: the task is an idea; generate a reviewable package skeleton, but do
   not claim reproducibility or produce publishable scores.
 - `prototype`: the task, fixtures, grader, and runner are wired together and
   have passed the package smoke checks; local Agent results are still
   experimental.
-- `verified`: the task, evaluation assets, runner, and output contract have
-  been exercised together; the declared package scope is reproducible enough
-  to report.
+- `verified`: the package has passed the release gate for its declared scope.
 - `blocked`: a required dependency, permission, fixture, de-identification
   requirement, or harness isolation guarantee is unavailable.
+
+These states are not a participant workflow. Participants receive a released
+package and do not promote, downgrade, or otherwise edit its state.
 
 Lifecycle state and model score are independent dimensions. The
 `acceptance.minimum_score`/`pass_policy.min_score` value decides whether one
@@ -54,9 +55,9 @@ checklist is complete.
 Never upgrade a task to `verified` merely because the prompt looks reasonable
 or because a model received a high score.
 
-### Lifecycle promotion checklist
+### Authoring checklist and release gate
 
-Evaluate these checks without looking at the numeric score:
+Use these checks while authoring, without looking at the numeric score:
 
 - `concept -> prototype`: task contract, fixtures, reference data, deterministic
   validators/scorer, and runner exist; reference-answer and malformed-output
@@ -69,6 +70,13 @@ Evaluate these checks without looking at the numeric score:
 - `verified -> prototype` or `blocked`: only when an asset, dependency,
   isolation guarantee, or reproducibility check regresses. A low model score is
   not a regression of benchmark validity.
+
+For an activity release, run the complete checklist before distribution and
+emit `status: verified` with `release.target: activity` and
+`release.ready_for_activity: true`. If any required check is missing, keep the
+private authoring package at `concept` or `prototype` and report the blocker;
+do not hand lifecycle decisions to participants. This release gate is about
+package validity and reproducibility, never about a minimum model score.
 
 ## Workflow
 
@@ -107,8 +115,9 @@ use `per_selected_model`; the participant still enters only one key for the
 model selected in that run.
 
 If the user only has an idea, propose one or more measurable task versions and
-identify the missing evidence. It is valid to create a `concept` package before
-the task has ever been run manually.
+identify the missing evidence. It is valid to create a private `concept`
+package before the task has ever been run manually. That authoring state must
+be resolved by the organizer before an activity package is distributed.
 
 ### 2. Check dependencies and build the allowlist
 
@@ -298,8 +307,8 @@ override by name.
 
 ### Participant workflow
 
-The participant uses the Skill to author a task package, then runs the same
-participant runner while iterating on the task:
+The participant receives an already released `verified` package. They do not
+manage lifecycle state. Their workflow is only:
 
 ```text
 task idea -> task/evaluation package -> choose one model -> enter its API key
@@ -311,8 +320,9 @@ There are no debug and official runner modes. A participant may repeat the
 same command with different allowed models to compare failure patterns. The
 selected model, fixed parameters, roll count, and scores must be recorded in
 the run manifest. The manifest's per-roll `status` (`passed`, `failed`, or
-`dry_run`) is an execution result. The separate `task_lifecycle_status` records
-the `task.yaml` state; it is not inferred from the score.
+`dry_run`) is an execution result. The separate `task_lifecycle_status` is
+informational release metadata; it is not inferred from the score and is not a
+participant-controlled field.
 
 ## Safety and isolation
 
@@ -352,9 +362,11 @@ Verify:
   model;
 - the allowlist contains only confirmed, available capabilities;
 - no secret, real customer data, absolute personal path, or broad mount exists;
-- the task state accurately reflects the validation level.
-- lifecycle promotion was decided from the checklist above, never from a score
-  threshold;
+- the task state accurately reflects the validation level;
+- an activity package has `status: verified`, `release.target: activity`, and
+  `release.ready_for_activity: true`;
+- lifecycle/release readiness was decided from the checklist above, never from
+  a score threshold;
 - the adapter stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
 - every exact-match string field has a public codebook in the task spec;
 - each roll records the task spec hash alongside the model and scorer hashes;
