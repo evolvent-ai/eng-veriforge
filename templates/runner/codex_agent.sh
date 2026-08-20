@@ -68,6 +68,10 @@ PROMPT
 } > "$prompt_file"
 
 export CODEX_HOME="$roll_dir/codex-home"
+# Codex CLI custom providers read CODEX_API_KEY. Keep OPENAI_API_KEY for
+# clients that use the OpenAI-compatible fallback, but make the Codex-specific
+# credential explicit so the request includes Authorization: Bearer <key>.
+export CODEX_API_KEY="$VERIFORGE_API_KEY"
 export OPENAI_API_KEY="$VERIFORGE_API_KEY"
 export CODEX_DISABLE_UPDATE_CHECK=1
 

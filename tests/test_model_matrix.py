@@ -22,6 +22,7 @@ RUNNER_PATH = ROOT / "templates" / "runner" / "run_task.py"
 WRAPPER_PATH = ROOT / "templates" / "runner" / "run_benchmark.sh"
 MATRIX_PATH = ROOT / "examples" / "activity-models.yaml"
 HARNESSES_PATH = ROOT / "templates" / "runner" / "harnesses.yaml"
+CODEX_AGENT_PATH = ROOT / "templates" / "runner" / "codex_agent.sh"
 
 
 def load_runner():
@@ -219,6 +220,11 @@ class CanonicalMatrixTests(unittest.TestCase):
         self.assertNotIn("WODEX_API_KEY", kimi_env)
         self.assertNotIn("DASHSCOPE_API_KEY", kimi_env)
         self.assertNotIn("DEEPSEEK_API_KEY", kimi_env)
+
+    def test_codex_harness_exports_codex_api_key(self):
+        script = CODEX_AGENT_PATH.read_text(encoding="utf-8")
+        self.assertIn('export CODEX_API_KEY="$VERIFORGE_API_KEY"', script)
+        self.assertIn('export OPENAI_API_KEY="$VERIFORGE_API_KEY"', script)
 
     def test_provider_adapters_translate_canonical_parameters(self):
         expected = {
