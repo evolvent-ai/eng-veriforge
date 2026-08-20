@@ -163,10 +163,17 @@ the baseline for model selection and fixed-profile resolution while preserving
 its allowlist behavior.
 Add the task-specific harness adapter around that baseline instead of
 reimplementing selection in the prompt.
+Copy `templates/runner/run_benchmark.sh` to `03-runner/run_benchmark.sh`, keep
+it executable, and use it as the participant's primary entry point.
 
 Rules:
 
 - Keep `task.yaml` as the task's source of truth.
+- Put a participant quick start immediately after the generated README's title
+  and one-sentence task summary. Its first and primary command MUST be
+  `./03-runner/run_benchmark.sh`; explain that it prompts for a model and only
+  that model's API key, then runs and scores three rolls by default. Keep
+  explicit `python ... --model` commands in an advanced/CI section.
 - Keep task IDs and output paths identical across task, rubric, scorer, and
   runner.
 - Every participant-facing package MUST include a task-specific provider
@@ -252,10 +259,17 @@ the score and failure diagnostics in the local evidence directory.
 The participant runner must support:
 
 ```bash
+./03-runner/run_benchmark.sh
 python 03-runner/run_task.py --preflight
 python 03-runner/run_task.py --model MODEL_ID --rolls N
 python 03-runner/run_task.py --interactive --rolls N
 ```
+
+The shell wrapper is the participant workflow. It must work regardless of the
+caller's current directory, print the three-step flow before starting, and use
+three rolls unless the participant supplies another allowed count as its first
+argument. The Python commands are advanced/CI interfaces, not the generated
+README's primary instructions.
 
 If a task exposes an adapter command, both of these forms are valid and must
 behave identically:
@@ -289,6 +303,12 @@ automatically; never ask the participant to choose a profile or parameters.
 Reject unknown model IDs, missing/extra canonical models, alternate profiles,
 and arbitrary command-line hyperparameter overrides. A run selects exactly one
 model and a rollout count within `roll_policy`.
+
+When the participant does not pass `--results-dir`, create a fresh path under
+`results/` containing the selected model ID and a high-resolution UTC
+timestamp. Print that path before execution and print the final manifest path
+after scoring. Repeating the quick-start command must never collide with an
+earlier run's `roll-*` directories.
 
 `--preflight --model MODEL_ID` checks only the selected model's credential.
 `--preflight` without a model validates the complete matrix and reports the
@@ -402,6 +422,8 @@ Verify:
 - selected-model-only credential checks pass while an unselected model's
   missing credential does not block a run;
 - interactive model selection and allowlist rejection paths work;
+- the generated README leads with `./03-runner/run_benchmark.sh`, the wrapper
+  is executable, and a repeated run receives a new result directory;
 - the fixed profile is selected automatically and recorded with the chosen
   model;
 - the allowlist contains only confirmed, available capabilities;

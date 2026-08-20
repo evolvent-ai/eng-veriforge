@@ -2,6 +2,18 @@
 
 VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任务构思或既有工作流制作成可验证的本地 Agent Benchmark。
 
+## 参赛者一键运行
+
+进入生成的 benchmark 目录，只运行：
+
+```bash
+./03-runner/run_benchmark.sh
+```
+
+脚本会依次让参赛者选择一个模型、隐藏输入该模型的 API Key，然后默认自动
+执行 3 次 rollout 和评分。每次运行使用新的 `results/<model>-<timestamp>/`
+目录，不需要配置 provider、adapter、scorer、workspace 或输出路径。
+
 ## 三类产物
 
 1. 题目定义：题干、初始状态、约束和输出文件标准。
@@ -60,10 +72,16 @@ adapter 的 CLI 能力，不是 `models.yaml` 中可以由参赛者自由添加�
 profile。使用 `veriforge-model-matrix/v2` 时，runner 支持交互式选择：
 
 ```bash
-python 03-runner/run_task.py --interactive --rolls 3
+./03-runner/run_benchmark.sh
 ```
 
-也支持 CI 的显式调用：
+需要指定 rollout 次数时，例如运行 5 次：
+
+```bash
+./03-runner/run_benchmark.sh 5
+```
+
+CI 或高级调用也可以显式指定模型：
 
 ```bash
 python 03-runner/run_task.py \

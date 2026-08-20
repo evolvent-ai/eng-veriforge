@@ -27,7 +27,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.7"
+RUNNER_VERSION = "veriforge-runner/v1.8"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
@@ -107,6 +107,18 @@ PROVIDER_ADAPTERS = {
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def default_results_dir(model_id: str) -> Path:
+    """Create a collision-resistant result path for participant runs."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    base = Path("results") / f"{model_id}-{timestamp}"
+    candidate = base
+    suffix = 1
+    while candidate.exists():
+        candidate = Path(f"{base}-{suffix}")
+        suffix += 1
+    return candidate
 
 
 def load_catalog(path: Path) -> dict:
@@ -737,7 +749,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rolls", type=int)
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--results-dir", type=Path, default=Path("results"))
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="result directory (defaults to results/<model>-<UTC timestamp>)",
+    )
     parser.add_argument("--task-spec", type=Path, default=Path("01-task/task.yaml"))
     parser.add_argument(
         "--workspace-source",
@@ -803,6 +819,11 @@ def main() -> int:
         return 0
 
     model = models[0]
+    if args.results_dir is None:
+        args.results_dir = default_results_dir(model["id"])
+    print(f"[veriforge] 已选择模型: {model.get('display_name', model['id'])} ({model['id']})")
+    print(f"[veriforge] rollout 次数: {args.rolls}")
+    print(f"[veriforge] 结果目录: {args.results_dir}")
     credential_env = model.get("credential_env")
     credential = os.environ.get(credential_env) if credential_env else None
     if not credential and not args.dry_run:
@@ -854,7 +875,12 @@ def main() -> int:
         + "\n",
         encoding="utf-8",
     )
-    print(output)
+    if args.dry_run:
+        print(f"[veriforge] 完成: 已生成 {len(records)} 个 dry-run 记录（未调用模型或评分）")
+    else:
+        passed_count = sum(record["status"] == "passed" for record in records)
+        print(f"[veriforge] 完成: {passed_count}/{len(records)} rolls passed")
+    print(f"[veriforge] 运行清单: {output}")
     return 0 if all(record["status"] in {"dry_run", "passed"} for record in records) else 1
 
 

@@ -122,6 +122,23 @@ and custom parameters are not participant choices. A missing
 `credential_env` value may be entered at runtime using hidden input and must
 never be persisted.
 
+## Participant entry point
+
+Every generated package exposes one primary participant command from the
+package root:
+
+```bash
+./03-runner/run_benchmark.sh
+```
+
+The wrapper changes to the package root, explains the flow, prompts for one of
+the five models, requests only the selected model's API key with hidden input,
+and runs the default rollout count. An optional first argument changes the
+rollout count. Direct Python flags are advanced/CI interfaces. If no explicit
+result directory is supplied, the runner creates
+`results/<model-id>-<high-resolution-UTC-timestamp>/` so repeated runs cannot
+reuse a prior roll workspace.
+
 For a fixed activity, `models.yaml` may include:
 
 ```yaml

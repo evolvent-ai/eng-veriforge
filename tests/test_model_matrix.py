@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "templates" / "runner" / "run_task.py"
+WRAPPER_PATH = ROOT / "templates" / "runner" / "run_benchmark.sh"
 MATRIX_PATH = ROOT / "examples" / "activity-models.yaml"
 
 
@@ -48,6 +50,34 @@ class CanonicalMatrixTests(unittest.TestCase):
             path = self.write_matrix(Path(temp), self.matrix)
             loaded = RUNNER.load_catalog(path)
         self.assertEqual({model["id"] for model in loaded["models"]}, RUNNER.CANONICAL_MODEL_IDS)
+
+    def test_participant_wrapper_is_executable_and_cwd_independent(self):
+        self.assertTrue(os.access(WRAPPER_PATH, os.X_OK))
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "benchmark"
+            runner_dir = package / "03-runner"
+            runner_dir.mkdir(parents=True)
+            shutil.copy2(WRAPPER_PATH, runner_dir / "run_benchmark.sh")
+            shutil.copy2(RUNNER_PATH, runner_dir / "run_task.py")
+            shutil.copy2(MATRIX_PATH, runner_dir / "models.yaml")
+            completed = subprocess.run(
+                [str(runner_dir / "run_benchmark.sh"), "0"],
+                cwd=Path(temp),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("1. 选择一个模型", completed.stdout)
+        self.assertIn("--rolls must be between", completed.stderr)
+
+    def test_default_results_directory_names_model_and_timestamp(self):
+        result_path = RUNNER.default_results_dir("gpt-5.6-sol")
+        self.assertEqual(result_path.parent, Path("results"))
+        self.assertRegex(
+            result_path.name,
+            r"^gpt-5\.6-sol-\d{8}T\d{12}Z$",
+        )
 
     def test_missing_or_extra_model_is_rejected(self):
         for mutation in ("missing", "extra"):
