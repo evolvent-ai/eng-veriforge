@@ -58,27 +58,36 @@ Collect or infer, then confirm with the user:
 - external side effects such as send, delete, publish, write, payment, or approval;
 - required MCPs, CLIs, Skills, directories, environment variables, and network.
 
-If the activity specifies an approved model list, use the fixed matrix in
-`examples/activity-models.yaml` as the activity baseline: `kimi-k3`,
-`deepseek-v4-pro`, `qwen3.8-max`, `claude-opus-5`, and `gpt-5.6-sol`. Keep
-display names separate from API IDs. Participants may choose one model per
-run, but the model matrix and that model's parameters are organizer-provided
-and immutable.
+Every generated benchmark is participant-facing and MUST use the canonical
+matrix in `examples/activity-models.yaml`. The matrix contains exactly these
+five model IDs and no other IDs: `kimi-k3`, `deepseek-v4-pro`, `qwen3.8-max`,
+`claude-opus-5`, and `gpt-5.6-sol`. Keep display names separate from API IDs.
+Participants may choose one model per run, but the complete matrix and every
+model's parameters are organizer-provided and immutable. A local-only task is
+still shipped with all five models; local smoke tests select one of those five
+IDs rather than creating a single-model exception.
 
-For a participant-facing activity with five choices, require exactly five
-entries and exactly one immutable `default` profile per model. Put
+The canonical credential mapping is also fixed: `kimi-k3` ->
+`MOONSHOT_API_KEY`, `deepseek-v4-pro` -> `DEEPSEEK_API_KEY`, `qwen3.8-max` ->
+`DASHSCOPE_API_KEY`, `claude-opus-5` -> `ANTHROPIC_API_KEY`, and `gpt-5.6-sol`
+-> `OPENAI_API_KEY`.
+
+Every generated `models.yaml` MUST contain
 `organizer_controls.model_matrix_locked: true`,
-`participant_model_choice_only: true`, `fixed_model_count: 5`, and
-`fixed_profile_only: true` in `models.yaml`. The fixed profiles use
+`participant_model_choice_only: true`, `fixed_model_count: 5`,
+`fixed_profile_only: true`, and `credential_mode: per_selected_model`.
+`selection.fixed_profile` MUST be `default`. Each of the five models MUST
+declare exactly one profile whose ID is `default`; no alternate profiles,
+participant parameters, provider substitutions, or unresolved placeholders are
+allowed. The fixed profile parameters are exactly
 `reasoning_effort: max` and `max_output_tokens: 32768`; provider adapters map
 the normalized reasoning control to their native highest-effort setting.
-Reject any activity matrix with extra profiles, participant parameters, or
-unresolved placeholders. The participant workflow exposes only model
-selection, rollout count, and runtime API-key input.
 
-The activity credential mode is fixed to `per_selected_model`: each selected
-model has its own credential environment variable, and the participant enters
-only the key for the model selected in that run.
+The participant workflow exposes only model selection, rollout count, and the
+runtime API key for the selected model. The runner MUST validate the exact
+canonical model ID set, the canonical provider/adapter/endpoint/base URL and
+credential environment mapping, the sole `default` profile, and the fixed
+parameters before accepting a package.
 
 If the user only has an idea, propose one or more measurable task versions and
 identify missing evidence, then generate the complete package with
@@ -166,8 +175,9 @@ Rules:
 - Default network to deny and external side effects to forbidden.
 - Use `veriforge-model-matrix/v2` when the task exposes a participant model
   choice. The matrix must contain only organizer-approved models.
-- For a five-choice activity, include `organizer_controls` and keep exactly
-  five confirmed models; never ship unresolved placeholders to participants.
+- Every participant package MUST include `organizer_controls`, keep exactly
+  the five canonical models, and never ship unresolved placeholders or a
+  single-model/alternate-matrix variant to participants.
 - Set `selection.mode` to `participant_selects_one`, disable participant
   profile/custom-parameter choices, and define the same fixed profile ID for
   every model. The profile is selected automatically after the participant
@@ -243,18 +253,24 @@ Task-specific adapters must propagate a non-zero Agent exit code and retain a
 bounded, secret-redacted diagnostic from both stdout and stderr; they must not
 redirect failures to `/dev/null`.
 
-When `--model` is omitted, prompt from the allowlisted model entries in
-`models.yaml`. After model selection, if its credential environment variable
-is absent, prompt for the API key using hidden input. Do not display, persist,
-or log the key. Select the sole fixed `default` profile automatically; never
-ask the participant to choose a profile or parameters. Reject unknown model
-IDs and arbitrary command-line hyperparameter overrides. A run selects exactly
-one model and a rollout count within `roll_policy`.
+When `--model` is omitted, prompt from the five canonical model entries in
+`models.yaml`. After model selection, if that model's credential environment
+variable is absent, prompt for only that API key using hidden input. Do not
+display, persist, or log the key. Select the sole fixed `default` profile
+automatically; never ask the participant to choose a profile or parameters.
+Reject unknown model IDs, missing/extra canonical models, alternate profiles,
+and arbitrary command-line hyperparameter overrides. A run selects exactly one
+model and a rollout count within `roll_policy`.
+
+`--preflight --model MODEL_ID` checks only the selected model's credential.
+`--preflight` without a model validates the complete matrix and reports the
+five credential-variable states, but missing credentials for unselected models
+are not fatal because credentials are intentionally `per_selected_model`.
 
 The model matrix and hyperparameters are fixed in the generated task version.
-Do not let conversational instructions silently override them. The activity
-baseline is the single profile in `examples/activity-models.yaml`; do not emit
-alternate parameter choices. Change it only when the organizer explicitly asks
+Do not let conversational instructions silently override them. The canonical
+five-model matrix and its single `default` profile per model are the only
+participant configuration. Change them only when the organizer explicitly asks
 for a skill revision after a standard test set is available.
 
 Adapters receive the selected fixed profile through `VERIFORGE_PARAMETERS_JSON`
@@ -306,6 +322,9 @@ an execution result; the top-level `benchmark_status` is always the literal
 - Do not start an Agent run if preflight reports a required `missing` dependency.
 - Do not expose an unapproved provider, model, profile, or hyperparameter
   override through the participant-facing runner.
+- Do not make credential availability for the other four models a prerequisite
+  after one model has been selected; only the selected model's credential may
+  be required or injected.
 - Record runner dependencies such as PyYAML in
   `03-runner/dependency-manifest.yaml` and preflight them before execution.
 - Test the credential prompt, both `--agent-command` forms, roll progress
@@ -325,6 +344,10 @@ Verify:
 - scorer paths match the output paths;
 - model IDs, hyperparameters, roll limits, concurrency, retries, and result
   locations are recorded;
+- `models.yaml` contains exactly the five canonical IDs, exact provider/adapter
+  mappings, one `default` profile per model, and the fixed parameters;
+- selected-model-only credential checks pass while an unselected model's
+  missing credential does not block a run;
 - interactive model selection and allowlist rejection paths work;
 - the fixed profile is selected automatically and recorded with the chosen
   model;

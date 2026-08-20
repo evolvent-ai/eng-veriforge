@@ -10,6 +10,12 @@ organizer_controls:
   fixed_model_count: 5
   fixed_profile_only: true
   credential_mode: per_selected_model
+  approved_model_ids:
+    - "kimi-k3"
+    - "deepseek-v4-pro"
+    - "qwen3.8-max"
+    - "claude-opus-5"
+    - "gpt-5.6-sol"
 
 selection:
   mode: participant_selects_one

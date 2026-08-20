@@ -130,15 +130,25 @@ organizer_controls:
   fixed_model_count: 5
   fixed_profile_only: true
   credential_mode: per_selected_model
+  approved_model_ids:
+    - "kimi-k3"
+    - "deepseek-v4-pro"
+    - "qwen3.8-max"
+    - "claude-opus-5"
+    - "gpt-5.6-sol"
 ```
 
-When this block is present, the runner requires exactly the declared number of
-models, rejects `REPLACE_WITH_*` values, and rejects participant profile or
-parameter overrides. The activity credential mode is fixed to
-`per_selected_model`, so each selected model uses its own confirmed
-`credential_env`. The lock is a task-package policy; a competition distributor
-should also publish an artifact checksum or otherwise prevent participants from
-editing `models.yaml` after distribution.
+Every participant-facing package MUST include this block with
+`fixed_model_count: 5`. The runner requires the exact canonical ID set
+`{kimi-k3, deepseek-v4-pro, qwen3.8-max, claude-opus-5, gpt-5.6-sol}`; missing,
+extra, or substituted IDs are invalid. It also rejects `REPLACE_WITH_*` values,
+provider/adapter/endpoint/credential mappings that differ from
+`examples/activity-models.yaml`, and participant profile or parameter
+overrides. The activity credential mode is fixed to `per_selected_model`, so
+after one model is selected only that model's confirmed `credential_env` is
+required and injected. The lock is a task-package policy; a competition
+distributor should also publish an artifact checksum or otherwise prevent
+participants from editing `models.yaml` after distribution.
 
 The activity matrix uses one immutable `default` profile per model. The fixed
 activity baseline is:
@@ -154,9 +164,9 @@ activity baseline is:
 `reasoning_effort: max` is the normalized VeriForge control. Each provider
 adapter maps it to that provider's highest supported reasoning/thinking mode.
 Do not expose provider-specific budget, temperature, top-p, or alternate
-profiles to participants. This baseline is the activity default until the
-organizer explicitly requests a skill revision after evaluating a standard
-test set.
+profiles to participants. This five-model baseline is the only participant
+matrix until the organizer explicitly requests a skill revision after
+evaluating a standard test set.
 
 ## Run manifest
 

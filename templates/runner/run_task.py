@@ -24,9 +24,53 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.4"
+RUNNER_VERSION = "veriforge-runner/v1.5"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
+FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
+CANONICAL_MODELS = {
+    "kimi-k3": {
+        "provider": "moonshot",
+        "adapter": "openai_chat",
+        "model_name": "kimi-k3",
+        "endpoint": "chat_completions",
+        "base_url": "https://api.moonshot.ai/v1",
+        "credential_env": "MOONSHOT_API_KEY",
+    },
+    "deepseek-v4-pro": {
+        "provider": "deepseek",
+        "adapter": "openai_responses",
+        "model_name": "deepseek-v4-pro",
+        "endpoint": "responses",
+        "base_url": "https://api.deepseek.com",
+        "credential_env": "DEEPSEEK_API_KEY",
+    },
+    "qwen3.8-max": {
+        "provider": "qwen",
+        "adapter": "openai_chat",
+        "model_name": "qwen3.8-max",
+        "endpoint": "chat_completions",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "credential_env": "DASHSCOPE_API_KEY",
+    },
+    "claude-opus-5": {
+        "provider": "anthropic",
+        "adapter": "anthropic_messages",
+        "model_name": "claude-opus-5",
+        "endpoint": "messages",
+        "base_url": "https://api.anthropic.com",
+        "credential_env": "ANTHROPIC_API_KEY",
+    },
+    "gpt-5.6-sol": {
+        "provider": "openai",
+        "adapter": "openai_responses",
+        "model_name": "gpt-5.6-sol",
+        "endpoint": "responses",
+        "base_url": "https://api.openai.com/v1",
+        "credential_env": "OPENAI_API_KEY",
+    },
+}
+CANONICAL_MODEL_IDS = frozenset(CANONICAL_MODELS)
 
 
 def utc_now() -> str:
@@ -47,8 +91,10 @@ def load_catalog(path: Path) -> dict:
         raise ValueError("models.yaml must use veriforge-model-matrix/v2")
 
     models = catalog.get("models")
-    if not isinstance(models, list) or not models:
-        raise ValueError("models.yaml must declare at least one model")
+    if not isinstance(models, list):
+        raise ValueError("models.yaml must declare a models list")
+    if len(models) != len(CANONICAL_MODELS):
+        raise ValueError("models.yaml must contain exactly the five canonical models")
 
     selection = catalog.get("selection")
     if not isinstance(selection, dict):
@@ -64,79 +110,58 @@ def load_catalog(path: Path) -> dict:
     if selection.get("max_models_per_run", 1) != 1:
         raise ValueError("a participant run may select exactly one model")
     fixed_profile = selection.get("fixed_profile", "default")
+    if fixed_profile != "default":
+        raise ValueError("selection.fixed_profile must be default")
+
+    organizer_controls = catalog.get("organizer_controls")
+    if not isinstance(organizer_controls, dict):
+        raise ValueError("organizer_controls is required for the canonical matrix")
+    if organizer_controls.get("model_matrix_locked") is not True:
+        raise ValueError("organizer_controls.model_matrix_locked must be true")
+    if organizer_controls.get("participant_model_choice_only") is not True:
+        raise ValueError("organizer_controls.participant_model_choice_only must be true")
+    if organizer_controls.get("fixed_profile_only") is not True:
+        raise ValueError("organizer_controls.fixed_profile_only must be true")
+    if organizer_controls.get("fixed_model_count") != len(CANONICAL_MODELS):
+        raise ValueError("organizer_controls.fixed_model_count must be 5")
+    if organizer_controls.get("credential_mode") != "per_selected_model":
+        raise ValueError("organizer_controls.credential_mode must be per_selected_model")
+    approved_ids = organizer_controls.get("approved_model_ids")
+    if not isinstance(approved_ids, list) or set(approved_ids) != CANONICAL_MODEL_IDS or len(approved_ids) != len(CANONICAL_MODELS):
+        raise ValueError("organizer_controls.approved_model_ids must be the five canonical IDs")
 
     seen_models: set[str] = set()
+    seen_credentials: set[str] = set()
     for model in models:
         if not isinstance(model, dict):
             raise ValueError("each model must be a mapping")
         model_id = model.get("id")
-        if not isinstance(model_id, str) or not model_id:
-            raise ValueError("each model needs a non-empty id")
+        if model_id not in CANONICAL_MODEL_IDS:
+            raise ValueError(f"model ID is not in the canonical matrix: {model_id}")
         if model_id in seen_models:
             raise ValueError(f"duplicate model id: {model_id}")
         seen_models.add(model_id)
-        if not model.get("model_name"):
-            raise ValueError(f"model {model_id} needs a canonical model_name")
-        profiles = model.get("profiles")
-        if not isinstance(profiles, list) or not profiles:
-            raise ValueError(f"model {model_id} needs at least one profile")
-        seen_profiles: set[str] = set()
-        for profile in profiles:
-            if not isinstance(profile, dict) or not profile.get("id"):
-                raise ValueError(f"model {model_id} contains an invalid profile")
-            profile_id = profile["id"]
-            if profile_id in seen_profiles:
-                raise ValueError(f"duplicate profile {profile_id} for model {model_id}")
-            seen_profiles.add(profile_id)
-            if not isinstance(profile.get("parameters", {}), dict):
-                raise ValueError(f"profile {profile_id} for {model_id} needs a parameter mapping")
-        if fixed_profile not in seen_profiles:
-            raise ValueError(f"model {model_id} has no fixed profile {fixed_profile}")
-
-        for field in ("provider", "model_name", "endpoint", "credential_env"):
+        canonical = CANONICAL_MODELS[model_id]
+        for field, expected in canonical.items():
             value = model.get(field)
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"model {model_id} needs a confirmed {field}")
-            if PLACEHOLDER_MARKER in value:
+            if value != expected:
+                raise ValueError(f"model {model_id}.{field} must equal the canonical matrix value")
+            if isinstance(value, str) and PLACEHOLDER_MARKER in value:
                 raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
-
-    organizer_controls = catalog.get("organizer_controls")
-    if organizer_controls is not None:
-        if not isinstance(organizer_controls, dict):
-            raise ValueError("organizer_controls must be a mapping")
-        if organizer_controls.get("model_matrix_locked") is not True:
-            raise ValueError("organizer_controls.model_matrix_locked must be true")
-        if organizer_controls.get("participant_model_choice_only") is not True:
-            raise ValueError("organizer_controls.participant_model_choice_only must be true")
-        fixed_count = organizer_controls.get("fixed_model_count")
-        if not isinstance(fixed_count, int) or isinstance(fixed_count, bool) or fixed_count < 1:
-            raise ValueError("organizer_controls.fixed_model_count must be a positive integer")
-        if len(models) != fixed_count:
-            raise ValueError(f"models.yaml must contain exactly {fixed_count} organizer-approved models")
-        if organizer_controls.get("fixed_profile_only", True) is not True:
-            raise ValueError("organizer_controls.fixed_profile_only must be true")
-        for model in models:
-            profiles = model["profiles"]
-            if len(profiles) != 1 or profiles[0].get("id") != fixed_profile:
-                raise ValueError(
-                    f"locked activity model {model['id']} must declare exactly one profile: {fixed_profile}"
-                )
-            for parameter_name in ("reasoning_effort", "max_output_tokens"):
-                if parameter_name not in profiles[0].get("parameters", {}):
-                    raise ValueError(
-                        f"locked activity model {model['id']} needs fixed parameter {parameter_name}"
-                    )
-            if profiles[0]["parameters"].get("reasoning_effort") != "max":
-                raise ValueError(f"locked activity model {model['id']} must use reasoning_effort=max")
-            if profiles[0]["parameters"].get("max_output_tokens") != 32768:
-                raise ValueError(f"locked activity model {model['id']} must use max_output_tokens=32768")
-            for field in ("adapter", "base_url"):
-                value = model.get(field)
-                if not isinstance(value, str) or not value.strip() or PLACEHOLDER_MARKER in value:
-                    raise ValueError(f"locked activity model {model['id']} needs a confirmed {field}")
-        credential_mode = organizer_controls.get("credential_mode", "per_selected_model")
-        if credential_mode != "per_selected_model":
-            raise ValueError("organizer_controls.credential_mode must be per_selected_model")
+        credential_env = canonical["credential_env"]
+        if credential_env in seen_credentials:
+            raise ValueError(f"credential_env must be unique: {credential_env}")
+        seen_credentials.add(credential_env)
+        profiles = model.get("profiles")
+        if not isinstance(profiles, list) or len(profiles) != 1:
+            raise ValueError(f"model {model_id} must declare exactly one profile")
+        profile = profiles[0]
+        if not isinstance(profile, dict) or profile.get("id") != "default":
+            raise ValueError(f"model {model_id} must declare the sole default profile")
+        if profile.get("parameters") != FIXED_PARAMETERS:
+            raise ValueError(f"model {model_id} default profile must use the fixed parameters")
+    if seen_models != CANONICAL_MODEL_IDS:
+        raise ValueError("models.yaml must contain exactly the five canonical model IDs")
 
     return catalog
 
@@ -362,7 +387,11 @@ def main() -> int:
         raise ValueError(f"task spec not found: {args.task_spec}")
     validate_task_spec(args.task_spec)
     if args.preflight:
-        missing = check_credentials(models)
+        # Credential mode is per_selected_model. A matrix-only preflight may
+        # report all five variables, but only an explicitly selected model can
+        # make the preflight fail for a missing credential.
+        selected_for_check = bool(args.model or args.interactive)
+        missing = check_credentials(models) if selected_for_check else []
         for model in models:
             variable = model.get("credential_env")
             state = "ready" if not variable or os.environ.get(variable) else "missing"

@@ -24,19 +24,20 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 
 详细契约见 `references/task-contract.md`。
 
-## 活动预配置
+## 参赛者固定模型矩阵
 
-如果这是一个面向参赛者的固定活动，直接使用
-`examples/activity-models.yaml` 中的活动矩阵 v1：`kimi-k3`、
-`deepseek-v4-pro`、`qwen3.8-max`、`claude-opus-5`、`gpt-5.6-sol`。五个
-模型各只有一个固定 `default` profile，推理档统一为 `max`，输出上限统一
-为 `32768`。runner 会拒绝数量不符、额外 profile、参数不完整或仍含
-`REPLACE_WITH_*` 的配置。
+所有生成的 participant-facing benchmark 都直接使用
+`examples/activity-models.yaml` 的 canonical matrix：`kimi-k3`、
+`deepseek-v4-pro`、`qwen3.8-max`、`claude-opus-5`、`gpt-5.6-sol`。无论任务
+是否 `local_only`，任务包都必须包含这五个模型，不能生成单模型例外或替换
+模型。五个模型各只有一个固定 `default` profile，推理档统一为 `max`，输出
+上限统一为 `32768`。runner 会拒绝缺失/额外/未知模型、额外 profile、参数
+不完整、provider 映射不一致或仍含 `REPLACE_WITH_*` 的配置。
 
 参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，只能
 从这五个已批准模型中选择一个，在运行时输入所选模型的 API Key，并选择
-rollout 次数。当前活动固定使用 `per_selected_model`：每次只输入当前模型
-对应的一个 Key。
+rollout 次数。固定使用 `per_selected_model`：每次只输入和注入当前选中模型
+对应的一个 Key；其他四个模型的 Key 缺失不应阻止当前运行。
 
 默认能力基线建议只包含：
 
@@ -93,10 +94,14 @@ adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文�
 `CODEX_BIN`；runner 只会显式转发这个已知的非敏感变量，不会透传完整用户
 环境。
 
-参赛者只能选择 `models.yaml` 中声明的模型，不能通过命令行临时覆盖
+参赛者只能选择 canonical matrix 中声明的模型，不能通过命令行临时覆盖
 temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的
 API Key 环境变量不存在，runner 会用隐藏输入提示输入 Key；Key 只注入
 当前 rollout 进程，不会写入文件、日志或 manifest。
+
+`--preflight --model MODEL_ID` 只检查所选模型的 credential env；不带
+`--model` 的 preflight 会校验完整矩阵并展示五个 credential env 的状态，
+但不会因为未选择的模型缺少 Key 而失败。
 
 固定参数只有两项：`reasoning_effort: max` 和
 `max_output_tokens: 32768`。不要在生成的任务包中暴露替代 profile、参数
