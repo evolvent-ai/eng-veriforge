@@ -60,6 +60,10 @@ export ANTHROPIC_API_KEY="$VERIFORGE_API_KEY"
 export ANTHROPIC_MODEL="$VERIFORGE_MODEL_NAME"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$roll_dir/claude-config}"
 
+# Do not expose runner-internal result paths to the model process. The wrapper
+# has already captured the paths it needs above.
+unset VERIFORGE_ROLL_DIR VERIFORGE_SCORER_RESULT
+
 exec "$claude_bin" -p "$(<"$prompt_file")" \
   --model "$VERIFORGE_MODEL_NAME" \
   --output-format text \

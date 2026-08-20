@@ -75,6 +75,10 @@ export CODEX_API_KEY="$VERIFORGE_API_KEY"
 export OPENAI_API_KEY="$VERIFORGE_API_KEY"
 export CODEX_DISABLE_UPDATE_CHECK=1
 
+# Do not expose runner-internal result paths to the model process. The wrapper
+# has already captured the paths it needs above.
+unset VERIFORGE_ROLL_DIR VERIFORGE_SCORER_RESULT
+
 exec "$codex_bin" exec \
   --ephemeral \
   --skip-git-repo-check \

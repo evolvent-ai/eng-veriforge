@@ -7,6 +7,7 @@ import argparse
 import getpass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +16,7 @@ import re
 import shutil
 import signal
 import stat
+import tempfile
 from datetime import datetime, timezone
 
 try:
@@ -23,11 +25,23 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v2.0"
+RUNNER_VERSION = "veriforge-runner/v2.1"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
 ISOLATION_MANIFEST_VERSION = "veriforge-isolation-manifest/v1"
+EVALUATION_DIR = "02-evaluation"
+CONTROL_PATHS = {
+    "scorer": "02-evaluation/scorer.py",
+    "rubric": "02-evaluation/rubric.yaml",
+    "reference_answer": "02-evaluation/reference_answer",
+    "validators": "02-evaluation/validators",
+    "harnesses": "03-runner/harnesses.yaml",
+    "models": "03-runner/models.yaml",
+    "allowlist": "03-runner/harness.allowlist.yaml",
+    "dependency_manifest": "03-runner/dependency-manifest.yaml",
+    "isolation_manifest": "03-runner/isolation-manifest.yaml",
+}
 CANONICAL_MODELS = {
     "kimi-k3": {
         "provider": "moonshot",
@@ -228,6 +242,17 @@ def load_catalog(path: Path) -> dict:
             raise ValueError(f"model {model_id} must declare the sole default profile")
         if profile.get("parameters") != FIXED_PARAMETERS:
             raise ValueError(f"model {model_id} default profile must use the fixed parameters")
+        timeout_seconds = profile.get("timeout_seconds")
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError(f"model {model_id} default profile must declare a finite positive timeout_seconds")
+        retries = profile.get("retries")
+        if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+            raise ValueError(f"model {model_id} default profile retries must be a non-negative integer")
     if seen_models != CANONICAL_MODEL_IDS:
         raise ValueError("models.yaml must contain exactly the five canonical model IDs")
 
@@ -276,18 +301,116 @@ def file_hash(path: Path) -> str:
 
 
 def tree_hash(root: Path) -> str:
-    """Hash a fixture tree by relative names and file contents."""
+    """Hash a path by relative names, file contents, and permission bits."""
     digest = hashlib.sha256()
+    if root.is_symlink():
+        digest.update(b"symlink\0")
+        digest.update(str(root.readlink()).encode("utf-8"))
+        return digest.hexdigest()
     if root.is_file():
+        digest.update(b"file\0")
         digest.update(root.name.encode("utf-8"))
+        digest.update(str(stat.S_IMODE(root.stat().st_mode)).encode("ascii"))
         digest.update(root.read_bytes())
         return digest.hexdigest()
     if not root.is_dir():
         return digest.hexdigest()
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(path.read_bytes())
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            digest.update(b"symlink\0" + relative + b"\0")
+            digest.update(str(path.readlink()).encode("utf-8"))
+        elif path.is_dir():
+            digest.update(b"directory\0" + relative + b"\0")
+            digest.update(str(stat.S_IMODE(path.stat().st_mode)).encode("ascii"))
+        elif path.is_file():
+            digest.update(b"file\0" + relative + b"\0")
+            digest.update(str(stat.S_IMODE(path.stat().st_mode)).encode("ascii"))
+            digest.update(b"\0" + path.read_bytes())
     return digest.hexdigest()
+
+
+def _relative_path(path: Path, root: Path) -> Path:
+    try:
+        return path.resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"path is outside workspace: {path}") from exc
+
+
+def _path_matches(relative: Path, roots: list[Path]) -> bool:
+    return any(relative == root or root in relative.parents for root in roots)
+
+
+def protected_workspace_hash(workspace: Path, mutable_paths: list[str]) -> str:
+    """Hash every workspace entry outside the declared mutable paths."""
+    root = workspace.resolve()
+    mutable = [Path(path) for path in mutable_paths]
+    digest = hashlib.sha256()
+    entries = sorted(
+        item
+        for item in root.rglob("*")
+        if item.is_file() or item.is_dir() or item.is_symlink()
+    )
+    for path in entries:
+        relative = path.relative_to(root)
+        if _path_matches(relative, mutable):
+            continue
+        digest.update(relative.as_posix().encode("utf-8") + b"\0")
+        if path.is_symlink():
+            digest.update(b"symlink\0" + str(path.readlink()).encode("utf-8"))
+        elif path.is_dir():
+            digest.update(b"directory\0")
+            digest.update(str(stat.S_IMODE(path.stat().st_mode)).encode("ascii"))
+        else:
+            digest.update(b"file\0")
+            digest.update(str(stat.S_IMODE(path.stat().st_mode)).encode("ascii"))
+            digest.update(b"\0" + path.read_bytes())
+    return digest.hexdigest()
+
+
+def make_read_only(path: Path) -> None:
+    """Remove write bits from a staged protected path."""
+    if not path.exists() and not path.is_symlink():
+        return
+    targets = [path]
+    if path.is_dir() and not path.is_symlink():
+        targets.extend(path.rglob("*"))
+    for target in targets:
+        mode = stat.S_IMODE(target.stat().st_mode)
+        target.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+def path_hashes(root: Path, entries: dict[str, str], *, required: bool) -> dict[str, str]:
+    """Hash named files/directories and fail closed for required controls."""
+    hashes: dict[str, str] = {}
+    for label, relative in entries.items():
+        path = root / relative
+        if not path.exists() and not path.is_symlink():
+            if required:
+                raise ValueError(f"required integrity path is missing: {relative}")
+            continue
+        if path.is_symlink():
+            raise ValueError(f"integrity path must not be a symlink: {relative}")
+        hashes[label] = tree_hash(path)
+    return hashes
+
+
+def package_integrity_hashes(
+    source: Path,
+    task_spec: Path,
+    manifest: dict,
+    *,
+    required: bool,
+) -> dict[str, str]:
+    """Hash all benchmark controls before and after an Agent rollout."""
+    source = source.resolve()
+    hashes: dict[str, str] = {}
+    hashes["task_spec"] = tree_hash(task_spec.resolve())
+    control_paths = dict(CONTROL_PATHS)
+    for index, relative in enumerate(manifest.get("fixture_paths", []), start=1):
+        control_paths[f"fixture:{index}:{relative}"] = relative
+    hashes.update(path_hashes(source, control_paths, required=required))
+    return hashes
 
 
 def load_isolation_manifest(workspace: Path, task_id: str) -> dict:
@@ -318,17 +441,77 @@ def load_isolation_manifest(workspace: Path, task_id: str) -> dict:
             if Path(relative).is_absolute() or ".." in Path(relative).parts:
                 raise ValueError(f"isolation manifest path escapes workspace: {relative}")
         manifest[key] = values
-    fixture_paths = manifest["fixture_paths"]
     manifest["manifest_path"] = str(path)
     return manifest
 
 
-def fixture_hashes(workspace: Path, manifest: dict) -> dict[str, str]:
+def validate_manifest_paths(
+    workspace: Path,
+    manifest: dict,
+    task_spec: Path,
+    *,
+    strict: bool = True,
+) -> None:
+    """Validate and materialize the declared read-only/mutable boundary."""
+    root = workspace.resolve()
+    read_only = [Path(path) for path in manifest.get("read_only_paths", [])]
+    mutable = [Path(path) for path in manifest.get("mutable_paths", [])]
+    if any(
+        _path_matches(left, [right]) or _path_matches(right, [left])
+        for left in read_only
+        for right in mutable
+    ):
+        raise ValueError("isolation manifest paths cannot be both read-only and mutable")
+
+    for relative in [*read_only, *mutable]:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"isolation manifest path escapes workspace: {relative}")
+        if relative == Path("."):
+            raise ValueError("isolation manifest paths must not be the workspace root")
+        candidate = root / relative
+        try:
+            candidate.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"isolation manifest path escapes workspace: {relative}") from exc
+
+    for relative in read_only:
+        candidate = root / relative
+        if not candidate.exists() and not candidate.is_symlink():
+            if strict:
+                raise ValueError(f"declared read-only path is missing: {relative}")
+            continue
+        make_read_only(candidate)
+
+    for relative in mutable:
+        candidate = root / relative
+        if candidate.exists() and candidate.is_symlink():
+            raise ValueError(f"mutable path must not be a symlink: {relative}")
+        if not candidate.exists():
+            candidate.mkdir(parents=True, exist_ok=True)
+
+    staged_spec = _relative_path(task_spec, root)
+    if strict and not _path_matches(staged_spec, read_only):
+        raise ValueError("task spec must be declared in isolation-manifest.read_only_paths")
+
+    output_dir = root / "outputs"
+    if strict and not _path_matches(_relative_path(output_dir, root), mutable):
+        raise ValueError("outputs must be covered by isolation-manifest.mutable_paths")
+    if strict:
+        for fixture in manifest.get("fixture_paths", []):
+            if not _path_matches(Path(fixture), read_only):
+                raise ValueError(f"fixture path must be read-only: {fixture}")
+
+
+def fixture_hashes(workspace: Path, manifest: dict, *, strict: bool = False) -> dict[str, str]:
     hashes = {}
     for relative in manifest.get("fixture_paths", []):
         path = workspace / relative
-        if path.exists():
-            hashes[relative] = tree_hash(path)
+        if not path.exists() and not path.is_symlink():
+            if strict:
+                raise ValueError(f"declared fixture path is missing: {relative}")
+            hashes[relative] = "<missing>"
+            continue
+        hashes[relative] = tree_hash(path)
     return hashes
 
 
@@ -365,13 +548,13 @@ def resolve_agent_command(
     )
 
 
-def resolve_scorer_command(workspace: Path, output_dir: Path, explicit: list[str] | None) -> list[str]:
-    """Use the generated deterministic scorer unless a developer override is supplied."""
+def resolve_scorer_command(evaluation_dir: Path, output_dir: Path, explicit: list[str] | None) -> list[str]:
+    """Use the trusted per-roll scorer unless a developer override is supplied."""
     if explicit:
         return explicit
-    scorer = workspace / "02-evaluation" / "scorer.py"
+    scorer = evaluation_dir / "scorer.py"
     if not scorer.is_file():
-        raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
+        raise ValueError("trusted scorer not found in the evaluation directory")
     return [sys.executable, str(scorer), "--outputs", str(output_dir)]
 
 
@@ -380,8 +563,32 @@ def validate_generated_package(
     explicit_agent: list[str] | None,
     explicit_scorer: list[str] | None,
     harness_id: str | None = None,
+    *,
+    participant_mode: bool = True,
 ) -> None:
     """Fail preflight before a participant enters a key if generated tools are missing."""
+    if participant_mode:
+        if explicit_agent or explicit_scorer:
+            raise ValueError("agent/scorer command overrides require --developer-mode")
+        required = (
+            source / "02-evaluation" / "scorer.py",
+            source / "02-evaluation" / "rubric.yaml",
+            source / "02-evaluation" / "reference_answer",
+            source / "02-evaluation" / "validators",
+            source / "03-runner" / "harness.allowlist.yaml",
+            source / "03-runner" / "dependency-manifest.yaml",
+            source / "03-runner" / "isolation-manifest.yaml",
+        )
+        missing = [str(path.relative_to(source)) for path in required if not path.exists()]
+        if missing:
+            raise ValueError(f"participant package is missing required integrity assets: {', '.join(missing)}")
+        harnesses = ("cc", "codex") if harness_id is None else (harness_id,)
+        for selected in harnesses:
+            adapter = source / "03-runner" / f"{selected}_agent.sh"
+            if not adapter.is_file() or not os.access(adapter, os.X_OK):
+                raise ValueError(f"participant package is missing executable adapter: {adapter.name}")
+        return
+
     resolve_agent_command(source, explicit_agent, harness_id)
     if explicit_scorer is None and not (source / "02-evaluation" / "scorer.py").is_file():
         raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
@@ -602,8 +809,15 @@ def infer_workspace_source(task_spec: Path) -> Path:
     return task_spec.parent
 
 
-def stage_workspace(source: Path, workspace: Path, task_spec: Path) -> Path:
-    """Copy a clean package into a roll workspace and protect the task spec."""
+def stage_workspace(
+    source: Path,
+    workspace: Path,
+    task_spec: Path,
+    manifest: dict,
+    *,
+    strict: bool = True,
+) -> Path:
+    """Copy only task/runtime inputs; evaluation assets stay outside the Agent workspace."""
     source = source.resolve()
     workspace = workspace.resolve()
     if not source.is_dir():
@@ -613,16 +827,74 @@ def stage_workspace(source: Path, workspace: Path, task_spec: Path) -> Path:
     except ValueError:
         relative_spec = Path("task.yaml")
 
-    def ignore_generated(_path: str, names: list[str]) -> set[str]:
-        return {name for name in names if name in {"results", ".git", "__pycache__", ".pytest_cache"}}
+    def ignore_generated(path: str, names: list[str]) -> set[str]:
+        current = Path(path).resolve()
+        ignored = {name for name in names if name in {"results", ".git", "__pycache__", ".pytest_cache"}}
+        if current == source and EVALUATION_DIR in names:
+            ignored.add(EVALUATION_DIR)
+        return ignored
 
     shutil.copytree(source, workspace, ignore=ignore_generated)
+
+    # Fixtures are the only evaluation assets the Agent is allowed to inspect.
+    for relative in manifest.get("fixture_paths", []):
+        fixture_source = source / relative
+        fixture_target = workspace / relative
+        if not fixture_source.exists() and not fixture_source.is_symlink():
+            if strict:
+                raise ValueError(f"declared fixture path is missing: {relative}")
+            continue
+        if fixture_source.is_symlink():
+            raise ValueError(f"declared fixture path must not be a symlink: {relative}")
+        fixture_target.parent.mkdir(parents=True, exist_ok=True)
+        if fixture_source.is_dir() and not fixture_source.is_symlink():
+            shutil.copytree(fixture_source, fixture_target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(fixture_source, fixture_target)
+
     staged_spec = workspace / relative_spec
     if not staged_spec.is_file():
         staged_spec.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(task_spec, staged_spec)
-    staged_spec.chmod(staged_spec.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    make_read_only(staged_spec)
     return staged_spec
+
+
+def stage_evaluation_source(source: Path, evaluation_dir: Path) -> Path:
+    """Create a trusted, per-roll copy of evaluation assets outside Agent cwd."""
+    evaluation_source = source.resolve() / EVALUATION_DIR
+    if not evaluation_source.is_dir():
+        raise ValueError("evaluation source not found: 02-evaluation")
+    shutil.copytree(
+        evaluation_source,
+        evaluation_dir,
+        dirs_exist_ok=True,
+        ignore=lambda _path, names: {name for name in names if name in {"__pycache__", ".pytest_cache"}},
+    )
+    make_read_only(evaluation_dir)
+    return evaluation_dir
+
+
+def remove_evaluation_source(evaluation_dir: Path) -> None:
+    """Remove the temporary evaluation copy even if an Agent changed modes."""
+    if not evaluation_dir.exists() and not evaluation_dir.is_symlink():
+        return
+    if evaluation_dir.is_symlink():
+        evaluation_dir.unlink()
+        return
+    evaluation_dir.chmod(stat.S_IRWXU)
+    for root, directories, files in os.walk(evaluation_dir, followlinks=False):
+        root_path = Path(root)
+        root_path.chmod(stat.S_IRWXU)
+        for name in directories:
+            target = root_path / name
+            if not target.is_symlink():
+                target.chmod(stat.S_IRWXU)
+        for name in files:
+            target = root_path / name
+            if not target.is_symlink():
+                target.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    shutil.rmtree(evaluation_dir)
 
 
 def _as_text(value: str | bytes | None) -> str:
@@ -672,7 +944,19 @@ def run_command(
                 pass
         else:  # pragma: no cover - Windows is not the supported local harness
             process.kill()
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired as second:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:  # pragma: no cover - Windows is not the supported local harness
+                process.kill()
+            stdout, stderr = process.communicate()
+            stdout = _as_text(second.stdout) + _as_text(stdout)
+            stderr = _as_text(second.stderr) + _as_text(stderr)
         return 124, _as_text(exc.stdout) + _as_text(stdout), _as_text(exc.stderr) + _as_text(stderr), True
 
 
@@ -698,14 +982,43 @@ def run_roll(
     for private_dir in (roll_dir / "home", roll_dir / "config", roll_dir / "cache"):
         private_dir.mkdir(parents=True, exist_ok=True)
 
-    staged_spec = stage_workspace(args.workspace_source, workspace, args.task_spec)
+    participant_mode = bool(getattr(args, "participant_mode", False))
+    source_manifest = load_isolation_manifest(args.workspace_source, args.task_id)
+    source_integrity_before = package_integrity_hashes(
+        args.workspace_source,
+        args.task_spec,
+        source_manifest,
+        required=participant_mode,
+    )
+    staged_spec = stage_workspace(
+        args.workspace_source,
+        workspace,
+        args.task_spec,
+        source_manifest,
+        strict=participant_mode,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     isolation_manifest = load_isolation_manifest(workspace, args.task_id)
-    fixture_before = fixture_hashes(workspace, isolation_manifest)
+    validate_manifest_paths(
+        workspace,
+        isolation_manifest,
+        staged_spec,
+        strict=participant_mode,
+    )
+    fixture_before = fixture_hashes(workspace, isolation_manifest, strict=participant_mode)
     fixture_root = (
         workspace / isolation_manifest["fixture_paths"][0]
         if isolation_manifest.get("fixture_paths")
         else workspace / "02-evaluation" / "fixtures"
+    )
+    evaluation_dir = stage_evaluation_source(
+        args.workspace_source,
+        Path(tempfile.mkdtemp(prefix="veriforge-evaluation-")),
+    )
+    evaluation_hash_before = tree_hash(evaluation_dir)
+    protected_workspace_before = protected_workspace_hash(
+        workspace,
+        isolation_manifest.get("mutable_paths", []),
     )
     staged_spec_hash = file_hash(staged_spec)
     command = resolve_agent_command(
@@ -714,7 +1027,7 @@ def run_roll(
         getattr(args, "harness_id", None),
     ) if not args.dry_run else None
     scorer_command = (
-        resolve_scorer_command(workspace, output_dir, getattr(args, "scorer_command", None))
+        resolve_scorer_command(evaluation_dir, output_dir, getattr(args, "scorer_command", None))
         if not args.dry_run
         else None
     )
@@ -735,10 +1048,18 @@ def run_roll(
         "roll": index,
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
+        "integrity_hashes": source_integrity_before,
+        "scorer_hash": source_integrity_before.get("scorer"),
+        "allowlist_hash": source_integrity_before.get("allowlist"),
+        "dependency_manifest_hash": source_integrity_before.get("dependency_manifest"),
         "task_spec_hash": task_spec_digest,
         "staged_task_spec_hash": staged_spec_hash,
         "fixture_hashes": fixture_before,
         "fixture_paths": list(fixture_before),
+        "evaluation_dir": str(evaluation_dir),
+        "evaluation_retained": False,
+        "evaluation_hash": evaluation_hash_before,
+        "protected_workspace_hash": protected_workspace_before,
         "isolation_manifest": isolation_manifest.get("manifest_path"),
         "benchmark_status": "verified",
         "started_at": started,
@@ -754,6 +1075,7 @@ def run_roll(
             json.dumps({"status": "not_run", "reason": "dry_run"}, indent=2) + "\n",
             encoding="utf-8",
         )
+        remove_evaluation_source(evaluation_dir)
         record["ended_at"] = utc_now()
         return record
 
@@ -773,7 +1095,6 @@ def run_roll(
         ),
         harness=harness,
     )
-    env["VERIFORGE_SCORER_RESULT"] = str(roll_dir / "scorer-result.json")
     print(f"[veriforge] roll {index}/{args.rolls}: starting agent in {workspace}", flush=True)
     try:
         returncode, stdout, stderr, timed_out = run_command(
@@ -791,8 +1112,32 @@ def run_roll(
     record["agent_stderr_log"] = str(logs_dir / "agent.stderr.log")
     record["returncode"] = returncode
     record["task_spec_integrity"] = file_hash(staged_spec) == staged_spec_hash
-    record["fixture_integrity"] = fixture_hashes(workspace, isolation_manifest) == fixture_before
-    integrity_ok = record["task_spec_integrity"] and record["fixture_integrity"]
+    fixture_after = fixture_hashes(workspace, isolation_manifest, strict=participant_mode)
+    source_integrity_after = package_integrity_hashes(
+        args.workspace_source,
+        args.task_spec,
+        source_manifest,
+        required=participant_mode,
+    )
+    protected_workspace_after = protected_workspace_hash(
+        workspace,
+        isolation_manifest.get("mutable_paths", []),
+    )
+    evaluation_hash_after = tree_hash(evaluation_dir)
+    record["fixture_integrity"] = fixture_after == fixture_before
+    record["integrity_hashes_after"] = source_integrity_after
+    record["evaluation_hash_after"] = evaluation_hash_after
+    record["protected_workspace_hash_after"] = protected_workspace_after
+    record["source_integrity"] = source_integrity_after == source_integrity_before
+    record["evaluation_integrity"] = evaluation_hash_after == evaluation_hash_before
+    record["workspace_integrity"] = protected_workspace_after == protected_workspace_before
+    integrity_ok = (
+        record["task_spec_integrity"]
+        and record["fixture_integrity"]
+        and record["source_integrity"]
+        and record["evaluation_integrity"]
+        and record["workspace_integrity"]
+    )
     record["status"] = "failed" if returncode != 0 or not integrity_ok else "pending"
     if timed_out:
         record["timeout_seconds"] = profile.get("timeout_seconds")
@@ -818,7 +1163,7 @@ def run_roll(
             json.dumps(
                 {
                     "status": "failed",
-                    "reason": "task spec or fixture integrity changed during agent run",
+                    "reason": "benchmark controls or protected workspace paths changed during agent run",
                 },
                 indent=2,
             )
@@ -828,26 +1173,43 @@ def run_roll(
         print(f"[veriforge] roll {index}/{args.rolls}: integrity check failed", flush=True)
     elif scorer_command:
         print(f"[veriforge] roll {index}/{args.rolls}: scoring", flush=True)
+        # The Agent can see the roll directory in legacy/custom adapters. Any
+        # pre-existing result is untrusted; scorer stdout is authoritative.
+        scorer_result_path.unlink(missing_ok=True)
+        scorer_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "VERIFORGE_OUTPUT_DIR": str(output_dir),
+        }
         try:
             scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = run_command(
                 scorer_command,
-                cwd=workspace,
-                env=env,
+                cwd=evaluation_dir,
+                env=scorer_env,
                 timeout=profile.get("timeout_seconds"),
             )
         except OSError as exc:
             scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = 127, "", str(exc), False
         write_redacted_log(logs_dir / "scorer.stdout.log", scorer_stdout, credential)
         write_redacted_log(logs_dir / "scorer.stderr.log", scorer_stderr, credential)
+        evaluation_hash_after_scoring = tree_hash(evaluation_dir)
+        record["evaluation_hash_after_scoring"] = evaluation_hash_after_scoring
+        scorer_integrity = evaluation_hash_after_scoring == evaluation_hash_before
+        record["scorer_integrity"] = scorer_integrity
         scorer_payload = None
-        scorer_source = scorer_result_path.read_text(encoding="utf-8") if scorer_result_path.exists() else scorer_stdout
         try:
-            parsed = json.loads(scorer_source)
+            parsed = json.loads(scorer_stdout)
             if isinstance(parsed, dict):
                 scorer_payload = parsed
         except json.JSONDecodeError:
             scorer_payload = None
-        if scorer_payload is None:
+        if not scorer_integrity:
+            scorer_payload = {
+                "status": "failed",
+                "reason": "trusted evaluation assets changed during scoring",
+                "returncode": scorer_returncode,
+            }
+        elif scorer_payload is None:
             scorer_payload = {
                 "status": "failed",
                 "reason": "scorer did not emit a JSON object",
@@ -857,10 +1219,14 @@ def run_roll(
             json.dumps(scorer_payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        record["scorer_status"] = "passed" if scorer_returncode == 0 and scorer_payload.get("passed") is True else "failed"
+        record["scorer_status"] = (
+            "passed"
+            if scorer_integrity and scorer_returncode == 0 and scorer_payload.get("passed") is True
+            else "failed"
+        )
         record["scorer_returncode"] = scorer_returncode
         record["score"] = scorer_payload.get("score")
-        record["passed"] = scorer_payload.get("passed") is True
+        record["passed"] = record["scorer_status"] == "passed"
         record["scorer_stdout_log"] = str(logs_dir / "scorer.stdout.log")
         record["scorer_stderr_log"] = str(logs_dir / "scorer.stderr.log")
         record["status"] = "passed" if record["scorer_status"] == "passed" else "failed"
@@ -870,6 +1236,7 @@ def run_roll(
             f"[veriforge] roll {index}/{args.rolls}: score={record.get('score')} status={record['status']}",
             flush=True,
         )
+    remove_evaluation_source(evaluation_dir)
     record["ended_at"] = utc_now()
     return record
 
@@ -887,6 +1254,11 @@ def parse_args() -> argparse.Namespace:
         help="organizer-approved CC/Codex harness matrix",
     )
     parser.add_argument("--interactive", action="store_true")
+    parser.add_argument(
+        "--developer-mode",
+        action="store_true",
+        help="enable local adapter/scorer/workspace overrides for development only",
+    )
     parser.add_argument("--rolls", type=int)
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -904,7 +1276,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scorer-command",
         nargs="+",
-        help="optional scorer command; it runs in each roll workspace after a successful agent",
+        help="developer-only scorer command; it runs after a successful agent",
     )
     parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
     # Accept both ``--agent-command command`` and the conventional
@@ -922,6 +1294,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.developer_mode and any(
+        value is not None for value in (args.agent_command, args.scorer_command, args.workspace_source)
+    ):
+        raise ValueError("--agent-command, --scorer-command, and --workspace-source require --developer-mode")
     catalog = load_catalog(args.models_file)
     harness_path = args.harnesses_file.resolve()
     if not harness_path.is_file() and args.harnesses_file == Path("03-runner/harnesses.yaml"):
@@ -934,6 +1310,8 @@ def main() -> int:
     elif args.harness:
         raise ValueError(f"harnesses file not found: {harness_path}")
     else:
+        if not args.developer_mode:
+            raise ValueError(f"harnesses file not found: {harness_path}")
         # Old developer-only packages may not have the new matrix yet. They
         # continue to work through the legacy provider adapter; generated
         # participant packages always ship harnesses.yaml.
@@ -981,6 +1359,7 @@ def main() -> int:
         args.agent_command,
         args.scorer_command,
         args.harness_id if harness_path.is_file() else None,
+        participant_mode=not args.developer_mode,
     )
     if args.preflight:
         # Credential mode is per_selected_model. A matrix-only preflight may
@@ -1022,6 +1401,7 @@ def main() -> int:
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
+    args.participant_mode = not args.developer_mode
     args.results_dir = args.results_dir.resolve()
     args.results_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.results_dir / "run-manifest.json"

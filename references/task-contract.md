@@ -211,19 +211,22 @@ mutable_paths:
 \`\`\`
 
 All paths are relative to the staged Agent workspace. The runner creates a
-fresh workspace for every roll, hashes every \`fixture_paths\` entry before and
-after the Agent runs, and hashes the staged task spec before and after the
-Agent runs. Any change to a declared fixture or the task spec fails the roll
-before scoring. \`read_only_paths\` and \`mutable_paths\` are also part of the
-generated package contract; a sandbox backend may enforce them as mounts, while
-the local fallback enforces integrity with the before/after hashes.
+fresh workspace for every roll, keeps scorer/reference/rubric/validator assets
+outside that workspace, and executes scorer from a trusted read-only evaluation
+copy. It hashes every fixture, read-only path, task spec, scorer, allowlist,
+dependency manifest, model catalog, and isolation manifest before and after the
+Agent runs. Any change to a protected control or any workspace path outside
+\`mutable_paths\` fails the roll before scoring. \`read_only_paths\` and
+\`mutable_paths\` are enforced by the local fallback with the before/after
+integrity checks; a sandbox backend may additionally enforce them as mounts.
 
 ## Run manifest
 
 Each roll must record task ID/version, fixed `benchmark_status: verified`,
 selected model ID, provider and adapter, fixed canonical parameters, the
 provider-native parameter fragment, roll count and roll number, start/end
-timestamps, runner version, harness allowlist hash, task spec hash, scorer
+timestamps, runner version, harness allowlist hash, dependency manifest hash,
+model and isolation manifest hashes, task spec hash, scorer hash, scorer
 version, execution status, score, and output paths. It must also record unique
 paths for the roll workspace, output directory, stdout/stderr logs, and scorer
 result. It must not contain secret values or credential environment variable

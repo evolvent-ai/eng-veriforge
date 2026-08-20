@@ -96,9 +96,12 @@ python 03-runner/run_task.py \
 开发调试时如果提供自定义 Agent adapter，可以直接传入命令；下面两种分隔符写法等价：
 
 ```bash
-python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
-python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
+python 03-runner/run_task.py --developer-mode --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
+python 03-runner/run_task.py --developer-mode --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
 ```
+
+`--agent-command`、`--scorer-command` 和 `--workspace-source` 只在显式
+`--developer-mode` 下可用；participant workflow 会拒绝这些 override。
 
 runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 profile 中的
 `timeout_seconds` 限制单次 Agent 运行。所选模型的 API Key 只在运行时隐藏输入
@@ -109,14 +112,16 @@ runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 pro
 兼容配置和 `Read/Write/Edit/Glob/Grep` 文件工具白名单。
 
 每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
-Agent 的 cwd；`outputs`、stdout/stderr 日志、scorer result、HOME、配置和
-缓存目录也都按 roll 分开。前一个 roll 在 workspace 中创建或修改的文件
-不会进入后一个 roll。runner 会按选择自动调用
-`03-runner/cc_agent.sh` 或 `03-runner/codex_agent.sh`，并发现
-`02-evaluation/scorer.py`，参赛者不需要传入 adapter 或 scorer 命令。
+Agent 的 cwd。`02-evaluation/scorer.py`、`rubric.yaml`、`reference_answer/`
+和 `validators/` 不会进入 Agent workspace；runner 会在 workspace 外创建独立的
+只读 evaluation 副本，并从该可信副本执行 scorer。`outputs`、stdout/stderr
+日志、scorer result、HOME、配置和缓存目录也都按 roll 分开。前一个 roll
+在 workspace 中创建或修改的文件不会进入后一个 roll。runner 会按选择自动调用
+`03-runner/cc_agent.sh` 或 `03-runner/codex_agent.sh`，并从可信 evaluation
+副本发现 `02-evaluation/scorer.py`，参赛者不需要传入 adapter 或 scorer 命令。
 `--workspace-source`、`--scorer-command` 和
-`--agent-command` 仅作为开发调试 override，并通过
-`VERIFORGE_SCORER_RESULT` 指向当前 roll 的结果路径。
+`--agent-command` 仅在显式 `--developer-mode` 下作为开发调试 override，并通过
+scorer stdout 生成当前 roll 的结果文件；Agent 不能预写结果来覆盖可信 scorer 输出。
 
 固定 profile 的统一参数不会直接冒充厂商参数。runner 内置 provider
 adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON`
@@ -126,8 +131,11 @@ adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON
 `reasoning_effort`/`max_tokens`。任务 adapter 必须使用转换后的字段。
 
 生成包中的 `03-runner/isolation-manifest.yaml` 声明 fixture、只读和可写
-路径。runner 会在每个 roll 前后校验声明的 fixture 和 task spec；发现
-Agent 修改契约或输入 fixture 时，该 roll 会在评分前失败。
+路径。runner 会在每个 roll 前后校验所有 read-only 路径、fixture、task spec
+以及 workspace 中所有非 mutable 路径；发现 Agent 修改契约、输入 fixture
+或任何未授权路径时，该 roll 会在评分前失败。scorer、task、fixtures、
+allowlist、dependency、models 和 isolation manifest 的完整哈希会写入
+run manifest。
 
 runner 会把任务定义文件的绝对路径通过 `VERIFORGE_TASK_SPEC` 传给 adapter。
 adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文件，并在 prompt

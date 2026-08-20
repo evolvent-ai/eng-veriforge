@@ -189,8 +189,10 @@ Rules:
   adapter but is never preferred for participant runs.
 - Every participant-facing package MUST include
   `03-runner/isolation-manifest.yaml` with relative fixture, read-only, and
-  mutable paths. The runner hashes declared fixtures and the task spec before
-  and after each roll.
+  mutable paths. The runner keeps scorer/reference/rubric/validator assets out
+  of the Agent workspace, executes scorer from a trusted per-roll evaluation
+  copy, and hashes task, fixtures, scorer, allowlist, dependency, models, and
+  isolation controls before and after each roll.
 - Prefer deterministic validation; use human/model judging only when the
   rubric defines its input, version, variance policy, and fallback behavior.
 - Store only de-identified fixtures and evidence.
@@ -284,22 +286,22 @@ three rolls unless the participant supplies another allowed count as its first
 argument. The Python commands are advanced/CI interfaces, not the generated
 README's primary instructions.
 
-If a task exposes an adapter command, both of these forms are valid and must
-behave identically:
+If a task exposes an adapter command in developer mode, both of these forms are
+valid and must behave identically:
 
 ```bash
-python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
-python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
+python 03-runner/run_task.py --developer-mode --model MODEL_ID --rolls 1 --agent-command ./03-runner/agent.sh
+python 03-runner/run_task.py --developer-mode --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
 ```
 
 The runner resolves `cc_agent.sh` for `--harness cc` and `codex_agent.sh` for
-`--harness codex`, and discovers `02-evaluation/scorer.py` inside the generated
-package.
-`--workspace-source`, `--scorer-command`, and `--agent-command` remain
-developer-only overrides for debugging or adapter development; they are not
-part of the participant workflow. The generated scorer runs in the isolated
-roll workspace and receives `VERIFORGE_SCORER_RESULT` pointing to that roll's
-result file.
+`--harness codex`, and executes `02-evaluation/scorer.py` from a trusted
+per-roll evaluation copy outside the Agent workspace.
+`--workspace-source`, `--scorer-command`, and `--agent-command` require the
+explicit `--developer-mode` flag and are rejected in participant mode. The
+generated scorer runs from a trusted read-only evaluation copy outside the
+Agent workspace. Its stdout is the sole authoritative JSON result; the runner
+writes that payload to the roll result file after verifying scorer integrity.
 
 The runner must print a non-secret progress message when each roll starts and
 finishes, report a bounded failure diagnostic, and enforce the profile's
@@ -399,7 +401,8 @@ an execution result; the top-level `benchmark_status` is always the literal
   Agent with that workspace as its cwd, and give each roll its own output,
   logs, scorer result, HOME, config directory, and cache directory. Never copy
   one roll's workspace into another roll.
-- Use read-only mounts for fixtures and a per-run output directory.
+- Keep scorer, reference answers, rubric, and validators outside the Agent
+  workspace; use read-only mounts for fixtures and a per-run output directory.
 - Block tasks that require real destructive or irreversible side effects unless
   the user provides an isolated test account and an explicit rollback plan.
 - Do not start an Agent run if preflight reports a required `missing` dependency.
@@ -421,7 +424,10 @@ an execution result; the top-level `benchmark_status` is always the literal
 - Test both harness selections and automatic scorer discovery with no
   participant command-line overrides; ensure `provider_agent.py` is never the
   participant default.
-- Test that a task-spec or declared fixture modification fails before scoring.
+- Test that a task-spec, declared read-only path, protected control, or
+  undeclared workspace modification fails before scoring.
+- Test that participant mode rejects `--agent-command`, `--scorer-command`, and
+  `--workspace-source`; developer mode is the only path that permits them.
 - Run the reference-answer and malformed-output schema smoke tests before
   treating an adapter rollout as evidence.
 

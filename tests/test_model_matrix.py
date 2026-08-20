@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -102,6 +103,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             shutil.copy2(WRAPPER_PATH, runner_dir / "run_benchmark.sh")
             shutil.copy2(RUNNER_PATH, runner_dir / "run_task.py")
             shutil.copy2(MATRIX_PATH, runner_dir / "models.yaml")
+            shutil.copy2(HARNESSES_PATH, runner_dir / "harnesses.yaml")
             completed = subprocess.run(
                 [str(runner_dir / "run_benchmark.sh"), "0"],
                 cwd=Path(temp),
@@ -160,6 +162,9 @@ class CanonicalMatrixTests(unittest.TestCase):
         changed_parameters = copy.deepcopy(self.matrix)
         changed_parameters["models"][0]["profiles"][0]["parameters"]["max_output_tokens"] = 1234
         mutations.append(changed_parameters)
+        non_finite_timeout = copy.deepcopy(self.matrix)
+        non_finite_timeout["models"][0]["profiles"][0]["timeout_seconds"] = float("nan")
+        mutations.append(non_finite_timeout)
         for matrix in mutations:
             with tempfile.TemporaryDirectory() as temp:
                 with self.assertRaises(ValueError):
@@ -186,6 +191,7 @@ class CanonicalMatrixTests(unittest.TestCase):
                 sys.executable,
                 str(RUNNER_PATH),
                 "--preflight",
+                "--developer-mode",
                 "--models-file",
                 str(matrix_path),
                 "--task-spec",
@@ -254,9 +260,10 @@ class CanonicalMatrixTests(unittest.TestCase):
             (source / "03-runner").mkdir()
             (source / "03-runner" / "provider_agent.py").write_text(
                 "import os; from pathlib import Path; "
-                "seen=Path('marker.txt').exists(); "
+                "output=Path(os.environ['VERIFORGE_OUTPUT_DIR']); output.mkdir(parents=True, exist_ok=True); "
+                "marker=output / 'marker.txt'; seen=marker.exists(); "
                 "print(f'marker-existed={seen} key={os.environ.get(\"WODEX_API_KEY\")}'); "
-                "Path('marker.txt').write_text('created', encoding='utf-8')\n",
+                "marker.write_text('created', encoding='utf-8')\n",
                 encoding="utf-8",
             )
             task_spec = source / "01-task" / "task.yaml"
@@ -282,8 +289,8 @@ class CanonicalMatrixTests(unittest.TestCase):
             second = RUNNER.run_roll(selected, profile, "runtime-secret", args, 2, "catalog", "task")
 
             self.assertNotEqual(first["workspace"], second["workspace"])
-            self.assertEqual(Path(first["workspace"]).joinpath("marker.txt").read_text(), "created")
-            self.assertEqual(Path(second["workspace"]).joinpath("marker.txt").read_text(), "created")
+            self.assertEqual(Path(first["output_dir"]).joinpath("marker.txt").read_text(), "created")
+            self.assertEqual(Path(second["output_dir"]).joinpath("marker.txt").read_text(), "created")
             self.assertIn("marker-existed=False", Path(second["agent_stdout_log"]).read_text())
             self.assertNotIn("runtime-secret", Path(second["agent_stdout_log"]).read_text())
             self.assertIn("<redacted>", Path(second["agent_stdout_log"]).read_text())
@@ -293,6 +300,373 @@ class CanonicalMatrixTests(unittest.TestCase):
             self.assertTrue(Path(first["agent_stderr_log"]).exists())
             self.assertEqual(json.loads(Path(second["scorer_result"]).read_text())["passed"], True)
             self.assertEqual(second["score"], 100)
+            self.assertFalse(Path(second["workspace"], "02-evaluation", "scorer.py").exists())
+            self.assertIn("scorer_hash", second)
+
+    def test_evaluation_assets_are_hidden_from_agent_and_scorer_is_trusted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation" / "reference_answer").mkdir(parents=True)
+            (source / "02-evaluation" / "validators").mkdir(parents=True)
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 100, 'passed': True}))\n",
+                encoding="utf-8",
+            )
+            (source / "02-evaluation" / "rubric.yaml").write_text("max_score: 100\n", encoding="utf-8")
+            (source / "02-evaluation" / "reference_answer" / "expected.json").write_text("{}\n", encoding="utf-8")
+            (source / "02-evaluation" / "validators" / "check.py").write_text("# trusted\n", encoding="utf-8")
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "from pathlib import Path; "
+                "Path('outputs/asset-visible.txt').write_text(str(Path('02-evaluation/scorer.py').exists()), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "trusted-evaluation-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertEqual(Path(record["output_dir"], "asset-visible.txt").read_text(), "False")
+            self.assertEqual(record["scorer_status"], "passed")
+            self.assertEqual(record["score"], 100)
+            self.assertEqual(record["scorer_hash"], record["integrity_hashes"]["scorer"])
+
+    def test_writes_outside_mutable_paths_fail_before_scoring(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 100, 'passed': True}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "from pathlib import Path; Path('forbidden.txt').write_text('changed', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "mutable-boundary-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertFalse(record["workspace_integrity"])
+            self.assertEqual(record["scorer_status"], "skipped_integrity_failure")
+            self.assertFalse((Path(record["scorer_result"]).read_text()).find('"passed": true') >= 0)
+
+    def test_agent_cannot_inject_workspace_scorer_for_a_full_score(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 0, 'passed': False}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "from pathlib import Path; "
+                "p=Path('02-evaluation/scorer.py'); p.parent.mkdir(parents=True, exist_ok=True); "
+                "p.write_text(\"import json; print(json.dumps({'score': 100, 'passed': True}))\\n\", encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "workspace-scorer-injection-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertFalse(record["workspace_integrity"])
+            self.assertEqual(record["scorer_status"], "skipped_integrity_failure")
+            self.assertNotEqual(record.get("score"), 100)
+            self.assertNotEqual(record.get("passed"), True)
+
+    def test_agent_cannot_prewrite_scorer_result_for_a_full_score(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 0, 'passed': False}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "import json, os; from pathlib import Path; "
+                "Path(os.environ['VERIFORGE_ROLL_DIR'], 'scorer-result.json').write_text("
+                "json.dumps({'score': 100, 'passed': True}), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "scorer-result-injection-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertEqual(record["scorer_status"], "failed")
+            self.assertEqual(record["score"], 0)
+            self.assertFalse(record["passed"])
+
+    def test_scorer_stdout_is_authoritative_over_result_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json, os; from pathlib import Path; "
+                "output=Path(os.environ['VERIFORGE_OUTPUT_DIR']); "
+                "Path(output.parents[1], 'scorer-result.json').write_text("
+                "json.dumps({'score': 100, 'passed': True}), encoding='utf-8'); "
+                "print(json.dumps({'score': 0, 'passed': False}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text("\n", encoding="utf-8")
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "authoritative-stdout-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertEqual(record["score"], 0)
+            self.assertFalse(record["passed"])
+            self.assertEqual(json.loads(Path(record["scorer_result"]).read_text())["score"], 0)
+
+    def test_scorer_copy_change_during_scoring_invalidates_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; from pathlib import Path; p=Path(__file__); p.chmod(0o700); "
+                "p.write_text(p.read_text(encoding='utf-8') + '# changed\\n', encoding='utf-8'); "
+                "print(json.dumps({'score': 100, 'passed': True}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text("\n", encoding="utf-8")
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "scorer-integrity-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertFalse(record["scorer_integrity"])
+            self.assertEqual(record["scorer_status"], "failed")
+            self.assertNotEqual(record.get("score"), 100)
+            self.assertFalse(record["passed"])
+
+    def test_agent_cannot_modify_trusted_evaluation_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 0, 'passed': False}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "import os; from pathlib import Path; "
+                "temp_root=Path(os.environ['VERIFORGE_ROLL_DIR']).parents[2]; "
+                "paths=list(temp_root.glob('veriforge-evaluation-*')); "
+                "assert paths; p=max(paths, key=lambda item: item.stat().st_mtime) / 'scorer.py'; "
+                "p.chmod(0o700); p.write_text("
+                "\"import json; print(json.dumps({'score': 100, 'passed': True}))\\n\", encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "evaluation-copy-injection-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertFalse(record["evaluation_integrity"])
+            self.assertEqual(record["scorer_status"], "skipped_integrity_failure")
+            self.assertNotEqual(record.get("score"), 100)
+
+    def test_integrity_hashes_cover_all_benchmark_controls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation" / "reference_answer").mkdir(parents=True)
+            (source / "02-evaluation" / "validators").mkdir(parents=True)
+            (source / "03-runner").mkdir(parents=True)
+            for relative in (
+                "02-evaluation/scorer.py",
+                "02-evaluation/rubric.yaml",
+                "02-evaluation/reference_answer/expected.json",
+                "02-evaluation/validators/check.py",
+                "03-runner/harnesses.yaml",
+                "03-runner/models.yaml",
+                "03-runner/harness.allowlist.yaml",
+                "03-runner/dependency-manifest.yaml",
+                "03-runner/isolation-manifest.yaml",
+                "02-evaluation/fixtures/input.txt",
+            ):
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative, encoding="utf-8")
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            manifest = {"fixture_paths": ["02-evaluation/fixtures"]}
+            before = RUNNER.package_integrity_hashes(source, task_spec, manifest, required=True)
+            self.assertTrue(
+                {
+                    "scorer",
+                    "rubric",
+                    "reference_answer",
+                    "validators",
+                    "harnesses",
+                    "models",
+                    "allowlist",
+                    "dependency_manifest",
+                    "isolation_manifest",
+                    "task_spec",
+                }.issubset(before)
+            )
+            self.assertTrue(any(key.startswith("fixture:") for key in before))
+            (source / "03-runner" / "harness.allowlist.yaml").write_text("changed", encoding="utf-8")
+            after = RUNNER.package_integrity_hashes(source, task_spec, manifest, required=True)
+            self.assertNotEqual(before["allowlist"], after["allowlist"])
+
+    def test_participant_mode_rejects_developer_overrides(self):
+        original_argv = sys.argv
+        try:
+            overrides = (
+                ["--workspace-source", "/tmp/untrusted-package"],
+                ["--scorer-command", "untrusted-scorer"],
+                ["--agent-command", "untrusted-agent"],
+            )
+            for override in overrides:
+                with self.subTest(override=override[0]):
+                    sys.argv = [str(RUNNER_PATH), *override]
+                    with self.assertRaisesRegex(ValueError, "require --developer-mode"):
+                        RUNNER.main()
+        finally:
+            sys.argv = original_argv
+
+    def test_harnesses_hide_runner_internal_paths_from_model_process(self):
+        for path in (ROOT / "templates" / "runner" / "cc_agent.sh", CODEX_AGENT_PATH):
+            script = path.read_text(encoding="utf-8")
+            self.assertIn("unset VERIFORGE_ROLL_DIR VERIFORGE_SCORER_RESULT", script)
+
+    def test_timeout_escalates_to_sigkill(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "ignore_term.py"
+            marker = Path(temp) / "term-received.txt"
+            script.write_text(
+                "import signal, time; from pathlib import Path; "
+                "signal.signal(signal.SIGTERM, lambda *_: Path('term-received.txt').write_text('yes')); "
+                "time.sleep(30)\n",
+                encoding="utf-8",
+            )
+            started = time.monotonic()
+            returncode, _stdout, _stderr, timed_out = RUNNER.run_command(
+                [sys.executable, str(script)],
+                cwd=Path(temp),
+                env={"PATH": os.environ.get("PATH", "")},
+                timeout=0.05,
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(returncode, 124)
+            self.assertTrue(timed_out)
+            self.assertEqual(marker.read_text(), "yes")
+            self.assertLess(elapsed, 3)
 
     def test_task_spec_modification_fails_before_scorer(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -353,6 +727,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             try:
                 sys.argv = [
                     str(RUNNER_PATH),
+                "--developer-mode",
                 "--harness",
                 "codex",
                 "--model",
