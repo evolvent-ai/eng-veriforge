@@ -8,6 +8,7 @@ organizer_controls:
   model_matrix_locked: true
   participant_model_choice_only: true
   fixed_model_count: 5
+  fixed_profile_only: true
   credential_mode: per_selected_model
 
 selection:
@@ -18,31 +19,37 @@ selection:
   max_models_per_run: 1
   fixed_profile: default
 
-# Replace every REPLACE_WITH_* value with the organizer's verified provider config
-# before publishing an activity package. Participants must not edit this matrix.
+# Activity matrix v1. These five IDs and profiles are fixed by the organizer.
+# Participants choose only one model and a rollout count.
 models:
   - id: "claude-opus-5"
     display_name: "Claude Opus 5"
     provider: "anthropic"
-    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
-    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    adapter: "anthropic_messages"
+    model_name: "claude-opus-5"
+    endpoint: "messages"
+    base_url: "https://api.anthropic.com"
     credential_env: "ANTHROPIC_API_KEY"
     profiles:
       - id: "default"
-        parameters: {}
+        parameters:
+          reasoning_effort: "max"
+          max_output_tokens: 32768
         timeout_seconds: 1800
         retries: 0
 
   - id: "gpt-5.6-sol"
     display_name: "GPT-5.6 Sol"
     provider: "openai"
+    adapter: "openai_responses"
     model_name: "gpt-5.6-sol"
     endpoint: "responses"
+    base_url: "https://api.openai.com/v1"
     credential_env: "OPENAI_API_KEY"
     profiles:
       - id: "default"
         parameters:
-          reasoning_effort: "medium"
+          reasoning_effort: "max"
           max_output_tokens: 32768
         timeout_seconds: 1800
         retries: 0
@@ -50,36 +57,48 @@ models:
   - id: "qwen3.8-max"
     display_name: "Qwen3.8 Max"
     provider: "qwen"
-    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
-    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
-    credential_env: "QWEN_API_KEY"
+    adapter: "openai_chat"
+    model_name: "qwen3.8-max"
+    endpoint: "chat_completions"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    credential_env: "DASHSCOPE_API_KEY"
     profiles:
       - id: "default"
-        parameters: {}
+        parameters:
+          reasoning_effort: "max"
+          max_output_tokens: 32768
         timeout_seconds: 1800
         retries: 0
 
-  - id: "k3"
+  - id: "kimi-k3"
     display_name: "K3"
-    provider: "REPLACE_WITH_CONFIRMED_PROVIDER"
-    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
-    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
-    credential_env: "K3_API_KEY"
+    provider: "moonshot"
+    adapter: "openai_chat"
+    model_name: "kimi-k3"
+    endpoint: "chat_completions"
+    base_url: "https://api.moonshot.ai/v1"
+    credential_env: "MOONSHOT_API_KEY"
     profiles:
       - id: "default"
-        parameters: {}
+        parameters:
+          reasoning_effort: "max"
+          max_output_tokens: 32768
         timeout_seconds: 1800
         retries: 0
 
   - id: "deepseek-v4-pro"
     display_name: "DeepSeek V4 Pro"
     provider: "deepseek"
-    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
-    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    adapter: "openai_responses"
+    model_name: "deepseek-v4-pro"
+    endpoint: "responses"
+    base_url: "https://api.deepseek.com"
     credential_env: "DEEPSEEK_API_KEY"
     profiles:
       - id: "default"
-        parameters: {}
+        parameters:
+          reasoning_effort: "max"
+          max_output_tokens: 32768
         timeout_seconds: 1800
         retries: 0
 

@@ -150,6 +150,7 @@ organizer_controls:
   model_matrix_locked: true
   participant_model_choice_only: true
   fixed_model_count: 5
+  fixed_profile_only: true
   credential_mode: per_selected_model # or single_runtime_key
 ```
 
@@ -160,6 +161,24 @@ parameter overrides. `single_runtime_key` additionally requires a confirmed
 model. The lock is a task-package policy; a competition distributor should
 also publish an artifact checksum or otherwise prevent participants from
 editing `models.yaml` after distribution.
+
+The activity matrix uses one immutable `default` profile per model. The fixed
+activity baseline is:
+
+| Model | Fixed reasoning | Fixed output limit |
+| --- | --- | --- |
+| `kimi-k3` | `reasoning_effort: max` | `max_output_tokens: 32768` |
+| `deepseek-v4-pro` | `reasoning_effort: max` | `max_output_tokens: 32768` |
+| `qwen3.8-max` | `reasoning_effort: max` | `max_output_tokens: 32768` |
+| `claude-opus-5` | `reasoning_effort: max` | `max_output_tokens: 32768` |
+| `gpt-5.6-sol` | `reasoning_effort: max` | `max_output_tokens: 32768` |
+
+`reasoning_effort: max` is the normalized VeriForge control. Each provider
+adapter maps it to that provider's highest supported reasoning/thinking mode.
+Do not expose provider-specific budget, temperature, top-p, or alternate
+profiles to participants. This baseline is the activity default until the
+organizer explicitly requests a skill revision after evaluating a standard
+test set.
 
 ## Run manifest
 

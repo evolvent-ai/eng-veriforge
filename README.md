@@ -28,16 +28,17 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 
 ## 活动预配置
 
-如果这是一个面向参赛者的固定活动，主办方应在任务包生成前锁定一个
-`models.yaml`：模型数量、canonical model ID、provider、endpoint、credential
-变量名和固定 profile 都由主办方提供。可以使用 `organizer_controls` 声明
-固定五模型矩阵；runner 会拒绝数量不符或仍含 `REPLACE_WITH_*` 的配置。
+如果这是一个面向参赛者的固定活动，直接使用
+`examples/activity-models.yaml` 中的活动矩阵 v1：`kimi-k3`、
+`deepseek-v4-pro`、`qwen3.8-max`、`claude-opus-5`、`gpt-5.6-sol`。五个
+模型各只有一个固定 `default` profile，推理档统一为 `max`，输出上限统一
+为 `32768`。runner 会拒绝数量不符、额外 profile、参数不完整或仍含
+`REPLACE_WITH_*` 的配置。
 
-参赛者拿到任务包后不需要填写 provider、endpoint 或模型 ID，只能从这五个
-已批准模型中选择一个，并在运行时输入所选模型的 API Key。若五个模型必须
-共用一个 API Key，主办方需要让它们通过同一个已确认的 provider gateway，
-并把所有 `credential_env` 固定为同一个变量；否则使用
-`per_selected_model`，参赛者每次只输入当前所选模型对应的一个 Key。
+参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，只能
+从这五个已批准模型中选择一个，在运行时输入所选模型的 API Key，并选择
+rollout 次数。当前活动固定使用 `per_selected_model`：每次只输入当前模型
+对应的一个 Key。
 
 默认能力基线建议只包含：
 
@@ -52,9 +53,9 @@ adapter 的 CLI 能力，不是 `models.yaml` 中可以由参赛者自由添加�
 
 ## 参赛者模型选择
 
-活动可以在任务包的 `03-runner/models.yaml` 中声明允许的模型和固定超参。
-参赛者每次选择一个模型和 rollout 次数，runner 自动使用该模型的固定
-参数。使用 `veriforge-model-matrix/v2` 时，runner 支持交互式选择：
+活动包在 `03-runner/models.yaml` 中声明五个允许模型和固定超参。参赛者每次
+只选择一个模型和 rollout 次数，runner 自动使用该模型唯一的 `default`
+profile。使用 `veriforge-model-matrix/v2` 时，runner 支持交互式选择：
 
 ```bash
 python 03-runner/run_task.py --interactive --rolls 3
@@ -98,6 +99,11 @@ adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文�
 temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的
 API Key 环境变量不存在，runner 会用隐藏输入提示输入 Key；Key 只注入
 当前 rollout 进程，不会写入文件、日志或 manifest。
+
+固定参数只有两项：`reasoning_effort: max` 和
+`max_output_tokens: 32768`。不要在生成的任务包中暴露替代 profile、参数
+菜单或“推荐值/可选值”说明。后续只有主办方明确要求修改 skill 时，才更新
+这组活动基线。
 
 runner 模板使用 Python 3 和 PyYAML 读取 `models.yaml`；生成任务时应在
 `03-runner/dependency-manifest.yaml` 中记录该依赖并进行预检。

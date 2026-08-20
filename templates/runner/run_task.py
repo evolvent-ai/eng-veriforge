@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.3"
+RUNNER_VERSION = "veriforge-runner/v1.4"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 
@@ -113,6 +113,27 @@ def load_catalog(path: Path) -> dict:
             raise ValueError("organizer_controls.fixed_model_count must be a positive integer")
         if len(models) != fixed_count:
             raise ValueError(f"models.yaml must contain exactly {fixed_count} organizer-approved models")
+        if organizer_controls.get("fixed_profile_only", True) is not True:
+            raise ValueError("organizer_controls.fixed_profile_only must be true")
+        for model in models:
+            profiles = model["profiles"]
+            if len(profiles) != 1 or profiles[0].get("id") != fixed_profile:
+                raise ValueError(
+                    f"locked activity model {model['id']} must declare exactly one profile: {fixed_profile}"
+                )
+            for parameter_name in ("reasoning_effort", "max_output_tokens"):
+                if parameter_name not in profiles[0].get("parameters", {}):
+                    raise ValueError(
+                        f"locked activity model {model['id']} needs fixed parameter {parameter_name}"
+                    )
+            if profiles[0]["parameters"].get("reasoning_effort") != "max":
+                raise ValueError(f"locked activity model {model['id']} must use reasoning_effort=max")
+            if profiles[0]["parameters"].get("max_output_tokens") != 32768:
+                raise ValueError(f"locked activity model {model['id']} must use max_output_tokens=32768")
+            for field in ("adapter", "base_url"):
+                value = model.get(field)
+                if not isinstance(value, str) or not value.strip() or PLACEHOLDER_MARKER in value:
+                    raise ValueError(f"locked activity model {model['id']} needs a confirmed {field}")
         credential_mode = organizer_controls.get("credential_mode", "per_selected_model")
         if credential_mode not in {"per_selected_model", "single_runtime_key"}:
             raise ValueError("organizer_controls.credential_mode is invalid")
@@ -215,6 +236,9 @@ def build_environment(model: dict, profile: dict, credential: str | None, task_s
             "VERIFORGE_MODEL_ID": model["id"],
             "VERIFORGE_MODEL_NAME": model["model_name"],
             "VERIFORGE_PROVIDER": str(model.get("provider", "")),
+            "VERIFORGE_ADAPTER": str(model.get("adapter", "")),
+            "VERIFORGE_ENDPOINT": str(model.get("endpoint", "")),
+            "VERIFORGE_BASE_URL": str(model.get("base_url", "")),
             "VERIFORGE_CODEX_MODEL_PROVIDER": str(model.get("codex_model_provider", "")),
             "VERIFORGE_CODEX_BASE_URL": str(model.get("codex_base_url", "")),
             "VERIFORGE_TASK_SPEC": str(task_spec),

@@ -93,20 +93,23 @@ Collect or infer, then confirm with the user:
 - external side effects such as send, delete, publish, write, payment, or approval;
 - required MCPs, CLIs, Skills, directories, environment variables, and network.
 
-If the activity specifies an approved model list, collect the canonical API
-model ID, provider, endpoint, runtime credential variable, and fixed
-parameters for every model. Keep display names separate from API IDs. Do not
-infer provider-specific IDs or parameters from a marketing name. Participants
-may choose one model per run, but the model matrix and that model's parameters
-are organizer-provided and immutable.
+If the activity specifies an approved model list, use the fixed matrix in
+`examples/activity-models.yaml` as the activity baseline: `kimi-k3`,
+`deepseek-v4-pro`, `qwen3.8-max`, `claude-opus-5`, and `gpt-5.6-sol`. Keep
+display names separate from API IDs. Participants may choose one model per
+run, but the model matrix and that model's parameters are organizer-provided
+and immutable.
 
-For a participant-facing activity with five choices, require the organizer to
-provide exactly five confirmed entries before publishing the package. Put
+For a participant-facing activity with five choices, require exactly five
+entries and exactly one immutable `default` profile per model. Put
 `organizer_controls.model_matrix_locked: true`,
-`participant_model_choice_only: true`, and `fixed_model_count: 5` in
-`models.yaml`. Reject the package while any provider, endpoint, model ID, or
-credential variable contains `REPLACE_WITH_*`. The participant workflow should
-expose only model selection, rollout count, and runtime API-key input.
+`participant_model_choice_only: true`, `fixed_model_count: 5`, and
+`fixed_profile_only: true` in `models.yaml`. The fixed profiles use
+`reasoning_effort: max` and `max_output_tokens: 32768`; provider adapters map
+the normalized reasoning control to their native highest-effort setting.
+Reject any activity matrix with extra profiles, participant parameters, or
+unresolved placeholders. The participant workflow exposes only model
+selection, rollout count, and runtime API-key input.
 
 If the organizer wants one API Key prompt for all five models, use
 `credential_mode: single_runtime_key` only when all models are served by the
@@ -280,16 +283,21 @@ redirect failures to `/dev/null`.
 When `--model` is omitted, prompt from the allowlisted model entries in
 `models.yaml`. After model selection, if its credential environment variable
 is absent, prompt for the API key using hidden input. Do not display, persist,
-or log the key. Select the fixed profile automatically; never ask the
-participant to choose a profile. Reject unknown model IDs and arbitrary
-command-line hyperparameter overrides. A run selects exactly one model and a
-roll count within `roll_policy`.
+or log the key. Select the sole fixed `default` profile automatically; never
+ask the participant to choose a profile or parameters. Reject unknown model
+IDs and arbitrary command-line hyperparameter overrides. A run selects exactly
+one model and a rollout count within `roll_policy`.
 
 The model matrix and hyperparameters are fixed in the generated task version.
-Do not let conversational instructions silently override them. Changes require
-an explicit experiment configuration and an auditable task/version update.
+Do not let conversational instructions silently override them. The activity
+baseline is the single profile in `examples/activity-models.yaml`; do not emit
+alternate parameter choices. Change it only when the organizer explicitly asks
+for a skill revision after a standard test set is available.
 
-If a Codex adapter needs a non-default provider, declare the non-secret
+Adapters receive the selected fixed profile through `VERIFORGE_PARAMETERS_JSON`
+and the selected model's `VERIFORGE_ADAPTER`, `VERIFORGE_ENDPOINT`, and
+`VERIFORGE_BASE_URL` environment variables. If a Codex adapter needs a non-default
+provider, declare the non-secret
 `codex_model_provider` and `codex_base_url` in the selected model entry and
 pass them as explicit temporary config overrides. Do not load the participant's
 global Codex config into the harness.
