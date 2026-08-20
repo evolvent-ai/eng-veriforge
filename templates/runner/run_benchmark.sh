@@ -7,9 +7,10 @@ rolls="${1:-3}"
 
 cd "$package_root"
 printf '%s\n' \
-  "VeriForge benchmark" \
-  "1. 选择一个模型" \
-  "2. 输入该模型的 API Key（输入内容不会显示或写入文件）" \
-  "3. 自动执行 ${rolls} 次 rollout、评分并保存结果" \
+  "VeriForge benchmark (Wodex)" \
+  "1. 选择 harness：Claude Code (CC) 或 Codex CLI" \
+  "2. 选择一个模型" \
+  "3. 输入 Wodex API Key（输入内容不会显示或写入文件）" \
+  "4. 自动执行 ${rolls} 次隔离 rollout、评分并保存结果" \
   ""
 exec python3 03-runner/run_task.py --interactive --rolls "$rolls"

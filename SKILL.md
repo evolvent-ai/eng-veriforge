@@ -67,10 +67,10 @@ model's parameters are organizer-provided and immutable. A local-only task is
 still shipped with all five models; local smoke tests select one of those five
 IDs rather than creating a single-model exception.
 
-The canonical credential mapping is also fixed: `kimi-k3` ->
-`MOONSHOT_API_KEY`, `deepseek-v4-pro` -> `DEEPSEEK_API_KEY`, `qwen3.8-max` ->
-`DASHSCOPE_API_KEY`, `claude-opus-5` -> `ANTHROPIC_API_KEY`, and `gpt-5.6-sol`
--> `OPENAI_API_KEY`.
+All five model IDs use the organizer's Wodex gateway and the same runtime-only
+credential: `WODEX_API_KEY`. The selected harness translates that gateway into
+the Claude Messages or OpenAI Responses protocol; participants never enter a
+vendor-specific key or endpoint.
 
 Every generated `models.yaml` MUST contain
 `organizer_controls.model_matrix_locked: true`,
@@ -83,8 +83,8 @@ allowed. The fixed profile parameters are exactly
 `reasoning_effort: max` and `max_output_tokens: 32768`; provider adapters map
 the normalized reasoning control to their native highest-effort setting.
 
-The participant workflow exposes only model selection, rollout count, and the
-runtime API key for the selected model. The runner MUST validate the exact
+The participant workflow exposes harness selection, model selection, rollout
+count, and one runtime Wodex API key. The runner MUST validate the exact
 canonical model ID set, the canonical provider/adapter/endpoint/base URL and
 credential environment mapping, the sole `default` profile, and the fixed
 parameters before accepting a package.
@@ -121,8 +121,9 @@ Only confirmed, available, and workspace-safe dependencies may enter
 `harness.allowlist.yaml`. Missing, unconfirmed, or over-broad capabilities stay
 out of the harness.
 
-For the default local activity, propose only the confirmed Codex CLI and, if the
-organizer supplies a Claude Code adapter, the confirmed Claude Code (CC) CLI.
+For the default local activity, propose exactly the confirmed Codex CLI and
+Claude Code (CC) CLI. Both are real execution harnesses, not model providers;
+the participant chooses one before choosing a model.
 Do not add MCPs, extra Skills, browsers, external apps, or network domains
 unless the organizer explicitly confirms a task requirement and its isolation
 boundary. A CLI belongs in the allowlist only after a harmless `--version` or
@@ -149,7 +150,10 @@ Use this layout:
 ├── 03-runner/
 │   ├── run_task.py
 │   ├── run_benchmark.sh
-│   ├── provider_agent.py
+│   ├── harnesses.yaml
+│   ├── cc_agent.sh
+│   ├── codex_agent.sh
+│   ├── provider_agent.py       # legacy developer-only smoke adapter
 │   ├── isolation-manifest.yaml
 │   ├── models.yaml
 │   ├── harness.allowlist.yaml
@@ -171,16 +175,16 @@ Rules:
 - Keep `task.yaml` as the task's source of truth.
 - Put a participant quick start immediately after the generated README's title
   and one-sentence task summary. Its first and primary command MUST be
-  `./03-runner/run_benchmark.sh`; explain that it prompts for a model and only
-  that model's API key, then runs and scores three rolls by default. Keep
+  `./03-runner/run_benchmark.sh`; explain that it prompts for a harness, model,
+  and one Wodex API key, then runs and scores three rolls by default. Keep
   explicit `python ... --model` commands in an advanced/CI section.
 - Keep task IDs and output paths identical across task, rubric, scorer, and
   runner.
-- Every participant-facing package MUST include a task-specific provider
-  adapter under `03-runner/provider_agent.py` (or `agent_adapter.py`) and a
-  deterministic `02-evaluation/scorer.py`. The participant runner discovers
-  both files automatically; participants do not pass provider, scorer, or
-  adapter commands.
+- Every participant-facing package MUST include `harnesses.yaml`, executable
+  `cc_agent.sh` and `codex_agent.sh`, plus a deterministic
+  `02-evaluation/scorer.py`. The participant runner resolves only the selected
+  harness script; `provider_agent.py` may remain as a developer-only legacy
+  adapter but is never preferred for participant runs.
 - Every participant-facing package MUST include
   `03-runner/isolation-manifest.yaml` with relative fixture, read-only, and
   mutable paths. The runner hashes declared fixtures and the task spec before
@@ -230,14 +234,18 @@ path in `VERIFORGE_TASK_SPEC`; the adapter must:
    names must match the deterministic validator exactly. Do not use synonyms
    such as `requests` for `reviews` or `reason` for `rationale_code`.
 
-The generated `provider_agent.py` is the default command discovered by the
-participant runner. It must consume `VERIFORGE_PROVIDER_REQUEST_JSON` (or its
-`VERIFORGE_NATIVE_PARAMETERS_JSON` parameters), use the selected credential
-variable, call only the selected provider, parse the provider response, and
-write the task's declared outputs under `VERIFORGE_OUTPUT_DIR`. It must not ask
-the participant for provider names, native parameter fields, or another API
-key. A package that only exposes native parameters but has no executable task
-adapter is incomplete.
+The generated `cc_agent.sh` and `codex_agent.sh` are the participant harness
+adapters. They run from the isolated roll workspace, pass the complete task
+contract to the selected CLI, require the Agent to read the staged task spec
+and fixtures, and write declared outputs under `VERIFORGE_OUTPUT_DIR`. CC sets
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, and `ANTHROPIC_MODEL` for Wodex.
+Codex creates a temporary `CODEX_HOME` with a Wodex OpenAI Responses provider
+and injects the key as `OPENAI_API_KEY`; it never reads the participant's global
+config. Both scripts fail clearly when their CLI is unavailable and propagate a
+non-zero exit code. CC must use its built-in file/search tool allowlist rather
+than `--dangerously-skip-permissions`; Codex must use `workspace-write` in the
+roll workspace. A package without both executable harness adapters is
+incomplete.
 
 Any string field that the scorer compares exactly (for example, rationale
 codes, statuses, or category labels) must have a closed codebook in `task.yaml`
@@ -245,10 +253,10 @@ and in the Agent prompt. Do not leave exact-match vocabularies implicit in the
 reference answer; that makes the benchmark under-specified rather than
 measuring the intended task skill.
 
-The adapter must map paths in the task spec to the staged workspace explicitly
-when staging changes their location. It must also keep the task spec outside
-the Agent output directory so the Agent cannot satisfy the task by editing the
-contract. A generated adapter is incomplete if it only names output files or
+The harness prompt must map paths in the task spec to the staged workspace
+explicitly when staging changes their location. It must also keep the task spec
+outside the Agent output directory so the Agent cannot satisfy the task by
+editing the contract. A harness is incomplete if it only names output files or
 leaves the model to invent a JSON schema.
 
 Before handoff, run a schema smoke test that confirms the reference answer
@@ -261,12 +269,12 @@ The participant runner must support:
 ```bash
 ./03-runner/run_benchmark.sh
 python 03-runner/run_task.py --preflight
-python 03-runner/run_task.py --model MODEL_ID --rolls N
+python 03-runner/run_task.py --harness codex --model MODEL_ID --rolls N
 python 03-runner/run_task.py --interactive --rolls N
 ```
 
 The shell wrapper is the participant workflow. It must work regardless of the
-caller's current directory, print the three-step flow before starting, and use
+caller's current directory, print the four-step harness -> model -> Wodex key -> rollout flow before starting, and use
 three rolls unless the participant supplies another allowed count as its first
 argument. The Python commands are advanced/CI interfaces, not the generated
 README's primary instructions.
@@ -279,8 +287,9 @@ python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-run
 python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
 ```
 
-The runner automatically discovers `03-runner/provider_agent.py` (or
-`agent_adapter.py`) and `02-evaluation/scorer.py` inside the generated package.
+The runner resolves `cc_agent.sh` for `--harness cc` and `codex_agent.sh` for
+`--harness codex`, and discovers `02-evaluation/scorer.py` inside the generated
+package.
 `--workspace-source`, `--scorer-command`, and `--agent-command` remain
 developer-only overrides for debugging or adapter development; they are not
 part of the participant workflow. The generated scorer runs in the isolated
@@ -295,10 +304,10 @@ Task-specific adapters must propagate a non-zero Agent exit code and retain a
 bounded, secret-redacted diagnostic from both stdout and stderr; they must not
 redirect failures to `/dev/null`.
 
-When `--model` is omitted, prompt from the five canonical model entries in
-`models.yaml`. After model selection, if that model's credential environment
-variable is absent, prompt for only that API key using hidden input. Do not
-display, persist, or log the key. Select the sole fixed `default` profile
+When `--harness` is omitted in an interactive run, prompt from `harnesses.yaml`
+first. Then, when `--model` is omitted, prompt from the five canonical model
+entries in `models.yaml`. If `WODEX_API_KEY` is absent, prompt for it using
+hidden input. Do not display, persist, or log the key. Select the sole fixed `default` profile
 automatically; never ask the participant to choose a profile or parameters.
 Reject unknown model IDs, missing/extra canonical models, alternate profiles,
 and arbitrary command-line hyperparameter overrides. A run selects exactly one
@@ -310,10 +319,10 @@ timestamp. Print that path before execution and print the final manifest path
 after scoring. Repeating the quick-start command must never collide with an
 earlier run's `roll-*` directories.
 
-`--preflight --model MODEL_ID` checks only the selected model's credential.
-`--preflight` without a model validates the complete matrix and reports the
-five credential-variable states, but missing credentials for unselected models
-are not fatal because credentials are intentionally `per_selected_model`.
+`--preflight --harness HARNESS_ID --model MODEL_ID` checks the selected
+harness, model, and Wodex credential. `--preflight` without selections validates
+both harnesses and the complete model matrix; a missing runtime key is reported
+but is not fatal until a real rollout starts.
 
 The model matrix and hyperparameters are fixed in the generated task version.
 Do not let conversational instructions silently override them. The canonical
@@ -321,13 +330,16 @@ five-model matrix and its single `default` profile per model are the only
 participant configuration. Change them only when the organizer explicitly asks
 for a skill revision after a standard test set is available.
 
-Adapters receive the selected fixed profile through `VERIFORGE_PARAMETERS_JSON`
+The runner still resolves the selected fixed profile through
+`VERIFORGE_PARAMETERS_JSON`
 and the selected model's `VERIFORGE_ADAPTER`, `VERIFORGE_ENDPOINT`, and
 `VERIFORGE_BASE_URL` environment variables. The runner MUST resolve the
 canonical profile through a provider adapter and expose the resulting native
 request fragment in `VERIFORGE_NATIVE_PARAMETERS_JSON` and
-`VERIFORGE_PROVIDER_REQUEST_JSON`; adapters must pass that fragment to the
-provider rather than forwarding the canonical keys verbatim. The built-in
+`VERIFORGE_PROVIDER_REQUEST_JSON`; the legacy direct adapter may use that
+fragment, while CC/Codex receive the fixed profile through their harness
+configuration. Never forward canonical keys verbatim when a native mapping is
+available. The built-in
 mapping is:
 
 | Adapter | Native reasoning field | Native output-limit field |
@@ -348,10 +360,8 @@ into the child process memory only. Never write it to task files, logs,
 manifests, results, shell history, or error messages. The credential variable
 name belongs in `models.yaml`; its value never does.
 
-If an adapter supports a machine-specific executable override such as
-`CODEX_BIN`, the runner may forward that named non-secret variable explicitly.
-Do not forward the participant's full environment; allowlist each adapter
-override by name.
+The runner may forward only the named non-secret executable overrides
+`CODEX_BIN` and `CLAUDE_BIN`. Do not forward the participant's full environment.
 
 ### Participant workflow
 
@@ -359,8 +369,9 @@ The participant receives the generated `verified` package and does not edit its
 status. Their workflow is only:
 
 ```text
-task idea -> task/evaluation package -> choose one model -> enter its API key
-  -> choose N rolls -> invoke Agent -> validate and score each roll
+task idea -> task/evaluation package -> choose CC/Codex -> choose one model
+  -> enter Wodex API key -> choose N rolls -> invoke selected harness
+  -> validate and score each roll
   -> inspect failure evidence -> refine the benchmark
 ```
 
@@ -387,9 +398,8 @@ an execution result; the top-level `benchmark_status` is always the literal
 - Do not start an Agent run if preflight reports a required `missing` dependency.
 - Do not expose an unapproved provider, model, profile, or hyperparameter
   override through the participant-facing runner.
-- Do not make credential availability for the other four models a prerequisite
-  after one model has been selected; only the selected model's credential may
-  be required or injected.
+- Do not require vendor-specific credentials; all models use only the Wodex key
+  for the selected run, injected into the selected harness process.
 - Record runner dependencies such as PyYAML in
   `03-runner/dependency-manifest.yaml` and preflight them before execution.
 - Test the credential prompt, both `--agent-command` forms, roll progress
@@ -401,8 +411,9 @@ an execution result; the top-level `benchmark_status` is always the literal
   logs under each roll directory.
 - Test every provider adapter's canonical-to-native parameter mapping and
   record the resolved native request in the roll manifest.
-- Test automatic adapter/scorer discovery with no participant command-line
-  overrides.
+- Test both harness selections and automatic scorer discovery with no
+  participant command-line overrides; ensure `provider_agent.py` is never the
+  participant default.
 - Test that a task-spec or declared fixture modification fails before scoring.
 - Run the reference-answer and malformed-output schema smoke tests before
   treating an adapter rollout as evidence.
@@ -417,11 +428,11 @@ Verify:
 - scorer paths match the output paths;
 - model IDs, hyperparameters, roll limits, concurrency, retries, and result
   locations are recorded;
-- `models.yaml` contains exactly the five canonical IDs, exact provider/adapter
-  mappings, one `default` profile per model, and the fixed parameters;
-- selected-model-only credential checks pass while an unselected model's
-  missing credential does not block a run;
-- interactive model selection and allowlist rejection paths work;
+- `models.yaml` contains exactly the five canonical IDs, exact Wodex provider/
+  adapter mappings, one `default` profile per model, and fixed parameters;
+- `harnesses.yaml` declares exactly `cc` and `codex`, with Wodex as the only
+  credential and network domain;
+- interactive harness-then-model selection and allowlist rejection paths work;
 - the generated README leads with `./03-runner/run_benchmark.sh`, the wrapper
   is executable, and a repeated run receives a new result directory;
 - the fixed profile is selected automatically and recorded with the chosen
@@ -429,13 +440,13 @@ Verify:
 - the allowlist contains only confirmed, available capabilities;
 - no secret, real customer data, absolute personal path, or broad mount exists;
 - the task has exactly `status: verified` and no `release` or `lifecycle` block;
-- the adapter stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
+- each harness stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
 - every exact-match string field has a public codebook in the task spec;
 - each roll records the task spec hash alongside the model and scorer hashes;
 - each roll has an isolated workspace, output directory, logs, and scorer
   result, and the Agent cwd is that workspace;
-- the canonical fixed parameters are converted to the selected provider's
-  native request fields and recorded without credentials;
+- the canonical fixed parameters are recorded without credentials and the
+  selected harness receives its Wodex-native configuration;
 - the reference answer passes and an alternate-key output fails deterministically;
 
 Report the task objective, fixed `verified` status, three artifact paths,
