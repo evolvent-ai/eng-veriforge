@@ -33,14 +33,42 @@ Use one of these states in `task.yaml`:
 
 - `concept`: the task is an idea; generate a reviewable package skeleton, but do
   not claim reproducibility or produce publishable scores.
-- `prototype`: the task, fixtures, or grader exist but are not fully validated;
-  local runs are experimental only.
-- `verified`: task, evaluation assets, runner, and output contract have been
-  exercised together; results are reproducible enough to report.
+- `prototype`: the task, fixtures, grader, and runner are wired together and
+  have passed the package smoke checks; local Agent results are still
+  experimental.
+- `verified`: the task, evaluation assets, runner, and output contract have
+  been exercised together; the declared package scope is reproducible enough
+  to report.
 - `blocked`: a required dependency, permission, fixture, de-identification
   requirement, or harness isolation guarantee is unavailable.
 
-Never upgrade a task to `verified` merely because the prompt looks reasonable.
+Lifecycle state and model score are independent dimensions. The
+`acceptance.minimum_score`/`pass_policy.min_score` value decides whether one
+Agent submission passes the task's scoring policy; it never upgrades,
+downgrades, or otherwise changes `task.yaml.status`. A low-scoring model run
+can be valid evidence for a `verified` benchmark, while a 100-point run alone
+cannot verify the benchmark package. The organizer changes the lifecycle state
+only after the corresponding asset, dependency, isolation, and reproducibility
+checklist is complete.
+
+Never upgrade a task to `verified` merely because the prompt looks reasonable
+or because a model received a high score.
+
+### Lifecycle promotion checklist
+
+Evaluate these checks without looking at the numeric score:
+
+- `concept -> prototype`: task contract, fixtures, reference data, deterministic
+  validators/scorer, and runner exist; reference-answer and malformed-output
+  smoke tests pass; the runner preflight passes for the declared package scope.
+- `prototype -> verified`: all declared dependencies and allowlisted model
+  configuration are confirmed; fixture integrity and isolation checks pass; at
+  least one end-to-end rollout produces a manifest and deterministic scorer
+  result; hashes and output paths are recorded; the result is reproducible for
+  the declared scope. The scorer result may be pass or fail.
+- `verified -> prototype` or `blocked`: only when an asset, dependency,
+  isolation guarantee, or reproducibility check regresses. A low model score is
+  not a regression of benchmark validity.
 
 ## Workflow
 
@@ -282,8 +310,9 @@ task idea -> task/evaluation package -> choose one model -> enter its API key
 There are no debug and official runner modes. A participant may repeat the
 same command with different allowed models to compare failure patterns. The
 selected model, fixed parameters, roll count, and scores must be recorded in
-the run manifest. The task status (`concept`, `prototype`, `verified`, or
-`blocked`) describes validation state; it is not a runner mode.
+the run manifest. The manifest's per-roll `status` (`passed`, `failed`, or
+`dry_run`) is an execution result. The separate `task_lifecycle_status` records
+the `task.yaml` state; it is not inferred from the score.
 
 ## Safety and isolation
 
@@ -324,6 +353,8 @@ Verify:
 - the allowlist contains only confirmed, available capabilities;
 - no secret, real customer data, absolute personal path, or broad mount exists;
 - the task state accurately reflects the validation level.
+- lifecycle promotion was decided from the checklist above, never from a score
+  threshold;
 - the adapter stages `VERIFORGE_TASK_SPEC` and passes the exact output contract;
 - every exact-match string field has a public codebook in the task spec;
 - each roll records the task spec hash alongside the model and scorer hashes;

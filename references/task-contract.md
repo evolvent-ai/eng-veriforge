@@ -25,8 +25,30 @@ constraints:
 acceptance:
   minimum_score: 75
   fatal_rules: []
+lifecycle:
+  score_role: report_only
+  promotion_owner: organizer
+  promotion_checks:
+    prototype: []
+    verified: []
 known_limitations: []
 ```
+
+`status` is the benchmark package lifecycle state. It is intentionally separate
+from scoring: `acceptance.minimum_score` is the pass threshold for one Agent
+submission, not a promotion threshold. A package may be `verified` when a model
+scores below the task pass threshold, provided the deterministic assets,
+isolation, and reproducibility checks are complete. Conversely, a high score on
+one rollout does not promote a `concept` package.
+
+Recommended `lifecycle` checks are:
+
+- `prototype`: task/fixture/reference/scorer/runner exist, reference and
+  malformed-output smoke tests pass, and preflight passes.
+- `verified`: declared dependencies and model configuration are confirmed,
+  isolation and fixture-integrity checks pass, and an end-to-end rollout emits a
+  reproducible manifest and scorer result. The numeric result may be pass or
+  fail.
 
 ## `rubric.yaml`
 
@@ -137,7 +159,8 @@ editing `models.yaml` after distribution.
 Each roll must record task ID/version, selected model ID, fixed profile ID,
 fixed parameters, roll count and roll number,
 start/end timestamps, runner version, harness allowlist hash,
-task spec hash, scorer version, status, score, and output paths. It must not
+task spec hash, scorer version, lifecycle status, execution status, score, and
+output paths. It must not
 contain secret values or credential environment variable values.
 
 ## Adapter and output-contract handoff

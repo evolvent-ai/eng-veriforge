@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.2"
+RUNNER_VERSION = "veriforge-runner/v1.3"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 
@@ -131,6 +131,20 @@ def catalog_hash(catalog: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def load_task_lifecycle_status(path: Path) -> str:
+    """Read package lifecycle state; never derive it from a model score."""
+    try:
+        task = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML in task spec: {exc}") from exc
+    if not isinstance(task, dict):
+        raise ValueError("task spec must contain a mapping")
+    status = task.get("status", "concept")
+    if status not in {"concept", "prototype", "verified", "blocked"}:
+        raise ValueError(f"invalid task lifecycle status: {status}")
+    return status
+
+
 def choose_index(items: list[tuple[str, str]], label: str) -> str:
     print(label)
     for index, (item_id, display_name) in enumerate(items, start=1):
@@ -218,6 +232,7 @@ def run_roll(
     index: int,
     config_digest: str,
     task_spec_digest: str,
+    task_lifecycle_status: str,
 ) -> dict:
     started = utc_now()
     command = args.agent_command
@@ -231,6 +246,8 @@ def run_roll(
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
         "task_spec_hash": task_spec_digest,
+        "task_lifecycle_status": task_lifecycle_status,
+        "status_scope": "roll",
         "started_at": started,
         "status": "dry_run" if args.dry_run else "pending",
     }
@@ -349,14 +366,39 @@ def main() -> int:
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
+    task_lifecycle_status = load_task_lifecycle_status(args.task_spec)
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
-        records.append(run_roll(model, profile, credential, args, roll, digest, task_spec_digest))
+        records.append(
+            run_roll(
+                model,
+                profile,
+                credential,
+                args,
+                roll,
+                digest,
+                task_spec_digest,
+                task_lifecycle_status,
+            )
+        )
 
     args.results_dir.mkdir(parents=True, exist_ok=True)
     output = args.results_dir / "run-manifest.json"
-    output.write_text(json.dumps({"runs": records}, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(
+            {
+                "task_id": args.task_id,
+                "task_lifecycle_status": task_lifecycle_status,
+                "status_scope": "rolls",
+                "runs": records,
+            },
+            indent=2,
+            ensure_ascii=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(output)
     return 0 if all(record["status"] in {"dry_run", "passed"} for record in records) else 1
 

@@ -8,6 +8,11 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 2. 评测资产：标答、fixture、rubric、验证器和评分器。
 3. 执行脚本：隔离 harness、Agent 调用、固定模型/超参、评分和 `N` 次 roll 聚合。
 
+任务包的生命周期状态（`concept`、`prototype`、`verified`、`blocked`）与
+模型分数是两个独立维度。`minimum_score` 只判断某一次提交是否通过评分
+策略；它不会自动升级或降级任务包。升级必须依据任务资产、依赖、隔离和
+可复现性检查清单，由主办方显式修改 `task.yaml.status`。
+
 ## 当前边界
 
 - 单一 Skill，不拆分 Skill2。
