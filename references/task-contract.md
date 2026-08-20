@@ -76,24 +76,48 @@ network:
 ## `models.yaml`
 
 ```yaml
-schema_version: "veriforge-model-matrix/v1"
+schema_version: "veriforge-model-matrix/v2"
 policy: fixed_for_task_version
+
+selection:
+  mode: participant_selects_one
+  allow_participant_model_choice: true
+  allow_participant_profile_choice: false
+  allow_custom_parameters: false
+  max_models_per_run: 1
+  fixed_profile: default
+
 models:
-  - id: "MODEL_A"
-    provider: "configured_by_organizer"
-    parameters:
-      temperature: 0
-      top_p: 1
-      max_tokens: 8192
-      seed: 42
+  - id: "model-id"
+    display_name: "Human readable name"
+    provider: "provider-name"
+    model_name: "provider/model-id"
+    endpoint: "responses"
+    credential_env: "PROVIDER_API_KEY"
+    profiles:
+      - id: "default"
+        parameters: {}
+        timeout_seconds: 1800
+        retries: 0
+
 roll_policy:
-  default_rolls: 1
+  min_rolls: 1
+  default_rolls: 3
   max_rolls: 10
   max_parallelism: 2
 ```
 
+`display_name` is participant-facing text; `model_name` is the canonical ID
+sent to the provider. A participant selects exactly one model per run. The
+runner automatically uses `selection.fixed_profile` for that model; profiles
+and custom parameters are not participant choices. A missing
+`credential_env` value may be entered at runtime using hidden input and must
+never be persisted.
+
 ## Run manifest
 
-Each roll must record task ID/version, model ID, fixed parameters, roll number,
-start/end timestamps, runner version, harness allowlist hash, scorer version,
-status, score, and output paths. It must not contain secret values.
+Each roll must record task ID/version, selected model ID, fixed profile ID,
+fixed parameters, roll count and roll number,
+start/end timestamps, runner version, harness allowlist hash,
+scorer version, status, score, and output paths. It must not contain secret
+values or credential environment variable values.

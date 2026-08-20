@@ -1,0 +1,82 @@
+schema_version: "veriforge-model-matrix/v2"
+task_id: "example-activity-v1"
+policy: fixed_for_task_version
+
+selection:
+  mode: participant_selects_one
+  allow_participant_model_choice: true
+  allow_participant_profile_choice: false
+  allow_custom_parameters: false
+  max_models_per_run: 1
+  fixed_profile: default
+
+# Replace every REPLACE_WITH_* value with the organizer's verified provider config
+# before moving a task beyond concept/prototype.
+models:
+  - id: "claude-opus-5"
+    display_name: "Claude Opus 5"
+    provider: "anthropic"
+    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
+    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    credential_env: "ANTHROPIC_API_KEY"
+    profiles:
+      - id: "default"
+        parameters: {}
+        timeout_seconds: 1800
+        retries: 0
+
+  - id: "gpt-5.6-sol"
+    display_name: "GPT-5.6 Sol"
+    provider: "openai"
+    model_name: "gpt-5.6-sol"
+    endpoint: "responses"
+    credential_env: "OPENAI_API_KEY"
+    profiles:
+      - id: "default"
+        parameters:
+          reasoning_effort: "medium"
+          max_output_tokens: 32768
+        timeout_seconds: 1800
+        retries: 0
+
+  - id: "qwen3.8-max"
+    display_name: "Qwen3.8 Max"
+    provider: "qwen"
+    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
+    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    credential_env: "QWEN_API_KEY"
+    profiles:
+      - id: "default"
+        parameters: {}
+        timeout_seconds: 1800
+        retries: 0
+
+  - id: "k3"
+    display_name: "K3"
+    provider: "REPLACE_WITH_CONFIRMED_PROVIDER"
+    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
+    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    credential_env: "K3_API_KEY"
+    profiles:
+      - id: "default"
+        parameters: {}
+        timeout_seconds: 1800
+        retries: 0
+
+  - id: "deepseek-v4-pro"
+    display_name: "DeepSeek V4 Pro"
+    provider: "deepseek"
+    model_name: "REPLACE_WITH_CONFIRMED_MODEL_ID"
+    endpoint: "REPLACE_WITH_CONFIRMED_ENDPOINT"
+    credential_env: "DEEPSEEK_API_KEY"
+    profiles:
+      - id: "default"
+        parameters: {}
+        timeout_seconds: 1800
+        retries: 0
+
+roll_policy:
+  min_rolls: 1
+  default_rolls: 3
+  max_rolls: 10
+  max_parallelism: 2

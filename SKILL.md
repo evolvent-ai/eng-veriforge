@@ -4,7 +4,8 @@ description: >-
   Use when designing, formalizing, or executing a local Agent benchmark task from
   an idea or workflow, including generating the task statement, output-file
   contract, reference answers, graders, fixtures, harness allowlists, and a
-  fixed-model multi-roll execution script.
+  participant-selected model rollout, fixed hyperparameter profiles, and
+  multi-roll evidence generation.
 ---
 
 # VeriForge — 可验证任务工坊
@@ -19,8 +20,9 @@ artifacts in one task directory:
    expected output files, output schemas, success criteria, and limitations.
 2. **Evaluation assets** — reference answers, fixtures, rubric, deterministic
    validators, optional judge configuration, and a scorer.
-3. **Task runner** — harness setup, Agent invocation, scoring, fixed model and
-   hyperparameter configuration, and `N`-roll result aggregation.
+3. **Task runner** — harness setup, Agent invocation, participant selection of
+   one organizer-approved model, runtime API-key input, fixed hyperparameter
+   configuration, scoring, and `N`-roll evidence generation.
 
 This skill is local-first. It does not upload ZIPs, create Harbor jobs, or run
 cloud tasks in the MVP.
@@ -30,11 +32,11 @@ cloud tasks in the MVP.
 Use one of these states in `task.yaml`:
 
 - `concept`: the task is an idea; generate a reviewable package skeleton, but do
-  not claim reproducibility or produce official scores.
+  not claim reproducibility or produce publishable scores.
 - `prototype`: the task, fixtures, or grader exist but are not fully validated;
   local runs are experimental only.
 - `verified`: task, evaluation assets, runner, and output contract have been
-  exercised together; official results are allowed.
+  exercised together; results are reproducible enough to report.
 - `blocked`: a required dependency, permission, fixture, de-identification
   requirement, or harness isolation guarantee is unavailable.
 
@@ -54,6 +56,13 @@ Collect or infer, then confirm with the user:
 - reference-answer source and acceptable answer variance;
 - external side effects such as send, delete, publish, write, payment, or approval;
 - required MCPs, CLIs, Skills, directories, environment variables, and network.
+
+If the activity specifies an approved model list, collect the canonical API
+model ID, provider, endpoint, runtime credential variable, and fixed
+parameters for every model. Keep display names separate from API IDs. Do not
+infer provider-specific IDs or parameters from a marketing name. Participants
+may choose one model per run, but the model matrix and that model's parameters
+are organizer-provided and immutable.
 
 If the user only has an idea, propose one or more measurable task versions and
 identify the missing evidence. It is valid to create a `concept` package before
@@ -114,6 +123,12 @@ Use this layout:
 └── evidence/
 ```
 
+When this repository's `templates/runner/run_task.py` is available, use it as
+the baseline for model selection and fixed-profile resolution while preserving
+its allowlist behavior.
+Add the task-specific harness adapter around that baseline instead of
+reimplementing selection in the prompt.
+
 Rules:
 
 - Keep `task.yaml` as the task's source of truth.
@@ -125,6 +140,12 @@ Rules:
 - Reject secrets, cookies, passwords, production data, absolute personal paths,
   and broad home-directory mounts.
 - Default network to deny and external side effects to forbidden.
+- Use `veriforge-model-matrix/v2` when the task exposes a participant model
+  choice. The matrix must contain only organizer-approved models.
+- Set `selection.mode` to `participant_selects_one`, disable participant
+  profile/custom-parameter choices, and define the same fixed profile ID for
+  every model. The profile is selected automatically after the participant
+  chooses a model.
 
 ### 4. Generate and run the task script
 
@@ -140,22 +161,48 @@ preflight dependencies and runtime secrets
   -> aggregate model × N-roll results
 ```
 
-The runner must support at least:
+The participant runner must support:
 
 ```bash
 python 03-runner/run_task.py --preflight
-python 03-runner/run_task.py --model MODEL_ID --rolls 1
-python 03-runner/run_task.py --all-models --rolls N
+python 03-runner/run_task.py --model MODEL_ID --rolls N
+python 03-runner/run_task.py --interactive --rolls N
 ```
+
+When `--model` is omitted, prompt from the allowlisted model entries in
+`models.yaml`. After model selection, if its credential environment variable
+is absent, prompt for the API key using hidden input. Do not display, persist,
+or log the key. Select the fixed profile automatically; never ask the
+participant to choose a profile. Reject unknown model IDs and arbitrary
+command-line hyperparameter overrides. A run selects exactly one model and a
+roll count within `roll_policy`.
 
 The model matrix and hyperparameters are fixed in the generated task version.
 Do not let conversational instructions silently override them. Changes require
 an explicit experiment configuration and an auditable task/version update.
 
-When a required API key is absent, ask for the variable name's value only at
-runtime, or report the missing variable in non-interactive mode. Inject it into
-the child process memory only. Never write it to task files, logs, manifests,
-results, shell history, or error messages.
+When a required API key is absent, ask for its value only at runtime using
+hidden input, or report the missing variable in non-interactive mode. Inject it
+into the child process memory only. Never write it to task files, logs,
+manifests, results, shell history, or error messages. The credential variable
+name belongs in `models.yaml`; its value never does.
+
+### Participant workflow
+
+The participant uses the Skill to author a task package, then runs the same
+participant runner while iterating on the task:
+
+```text
+task idea -> task/evaluation package -> choose one model -> enter its API key
+  -> choose N rolls -> invoke Agent -> validate and score each roll
+  -> inspect failure evidence -> refine the benchmark
+```
+
+There are no debug and official runner modes. A participant may repeat the
+same command with different allowed models to compare failure patterns. The
+selected model, fixed parameters, roll count, and scores must be recorded in
+the run manifest. The task status (`concept`, `prototype`, `verified`, or
+`blocked`) describes validation state; it is not a runner mode.
 
 ## Safety and isolation
 
@@ -169,6 +216,10 @@ results, shell history, or error messages.
 - Do not start an Agent run if preflight reports a required `missing` dependency.
 - Do not emit `official_result: true` for `concept`, `prototype`, or `blocked`
   tasks.
+- Do not expose an unapproved provider, model, profile, or hyperparameter
+  override through the participant-facing runner.
+- Record runner dependencies such as PyYAML in
+  `03-runner/dependency-manifest.yaml` and preflight them before execution.
 
 ## Self-check before handoff
 
@@ -180,6 +231,9 @@ Verify:
 - scorer paths match the output paths;
 - model IDs, hyperparameters, roll limits, concurrency, retries, and result
   locations are recorded;
+- interactive model selection and allowlist rejection paths work;
+- the fixed profile is selected automatically and recorded with the chosen
+  model;
 - the allowlist contains only confirmed, available capabilities;
 - no secret, real customer data, absolute personal path, or broad mount exists;
 - the task state accurately reflects the validation level.

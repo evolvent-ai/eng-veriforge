@@ -18,3 +18,29 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 - 当前版本本地优先，不包含云端 ZIP 上传、Harbor 调度或凭据托管。
 
 详细契约见 `references/task-contract.md`。
+
+## 参赛者模型选择
+
+活动可以在任务包的 `03-runner/models.yaml` 中声明允许的模型和固定超参。
+参赛者每次选择一个模型和 rollout 次数，runner 自动使用该模型的固定
+参数。使用 `veriforge-model-matrix/v2` 时，runner 支持交互式选择：
+
+```bash
+python 03-runner/run_task.py --interactive --rolls 3
+```
+
+也支持 CI 的显式调用：
+
+```bash
+python 03-runner/run_task.py \
+  --model gpt-5.6-sol \
+  --rolls 3
+```
+
+参赛者只能选择 `models.yaml` 中声明的模型，不能通过命令行临时覆盖
+temperature、top_p、max token 或 reasoning 参数。选择模型后，若对应的
+API Key 环境变量不存在，runner 会用隐藏输入提示输入 Key；Key 只注入
+当前 rollout 进程，不会写入文件、日志或 manifest。
+
+runner 模板使用 Python 3 和 PyYAML 读取 `models.yaml`；生成任务时应在
+`03-runner/dependency-manifest.yaml` 中记录该依赖并进行预检。
