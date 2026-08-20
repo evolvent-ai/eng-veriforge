@@ -169,6 +169,30 @@ profiles to participants. This five-model baseline is the only participant
 matrix until the organizer explicitly requests a skill revision after
 evaluating a standard test set.
 
+## \`isolation-manifest.yaml\`
+
+Every generated package should include this file under \`03-runner/\`:
+
+\`\`\`yaml
+schema_version: "veriforge-isolation-manifest/v1"
+task_id: "example-task-v1"
+fixture_paths:
+  - "02-evaluation/fixtures"
+read_only_paths:
+  - "02-evaluation/fixtures"
+  - "01-task/task.yaml"
+mutable_paths:
+  - "outputs"
+\`\`\`
+
+All paths are relative to the staged Agent workspace. The runner creates a
+fresh workspace for every roll, hashes every \`fixture_paths\` entry before and
+after the Agent runs, and hashes the staged task spec before and after the
+Agent runs. Any change to a declared fixture or the task spec fails the roll
+before scoring. \`read_only_paths\` and \`mutable_paths\` are also part of the
+generated package contract; a sandbox backend may enforce them as mounts, while
+the local fallback enforces integrity with the before/after hashes.
+
 ## Run manifest
 
 Each roll must record task ID/version, fixed `benchmark_status: verified`,
@@ -209,6 +233,13 @@ keys, allowed enum values, required Markdown headings, evidence reference
 shape, and fatal safety constraints. Filenames alone are insufficient because
 an Agent can produce a plausible but validator-incompatible schema. The
 adapter must reject missing outputs or non-zero Agent exits before scoring.
+
+The default generated adapter is `03-runner/provider_agent.py`. It receives the
+selected credential and `VERIFORGE_PROVIDER_REQUEST_JSON`, calls only the
+selected provider, and writes the declared outputs under
+`VERIFORGE_OUTPUT_DIR`. It must not ask participants to provide provider names,
+native parameter fields, or additional credentials. The participant runner
+automatically invokes this adapter and then `02-evaluation/scorer.py`.
 
 Every string field that the scorer compares exactly must have its closed
 codebook declared in `task.yaml` and repeated in the adapter prompt. Exact-match

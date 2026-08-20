@@ -149,6 +149,8 @@ Use this layout:
 ├── 03-runner/
 │   ├── run_task.py
 │   ├── run_benchmark.sh
+│   ├── provider_agent.py
+│   ├── isolation-manifest.yaml
 │   ├── models.yaml
 │   ├── harness.allowlist.yaml
 │   └── dependency-manifest.yaml
@@ -167,6 +169,15 @@ Rules:
 - Keep `task.yaml` as the task's source of truth.
 - Keep task IDs and output paths identical across task, rubric, scorer, and
   runner.
+- Every participant-facing package MUST include a task-specific provider
+  adapter under `03-runner/provider_agent.py` (or `agent_adapter.py`) and a
+  deterministic `02-evaluation/scorer.py`. The participant runner discovers
+  both files automatically; participants do not pass provider, scorer, or
+  adapter commands.
+- Every participant-facing package MUST include
+  `03-runner/isolation-manifest.yaml` with relative fixture, read-only, and
+  mutable paths. The runner hashes declared fixtures and the task spec before
+  and after each roll.
 - Prefer deterministic validation; use human/model judging only when the
   rubric defines its input, version, variance policy, and fallback behavior.
 - Store only de-identified fixtures and evidence.
@@ -212,6 +223,15 @@ path in `VERIFORGE_TASK_SPEC`; the adapter must:
    names must match the deterministic validator exactly. Do not use synonyms
    such as `requests` for `reviews` or `reason` for `rationale_code`.
 
+The generated `provider_agent.py` is the default command discovered by the
+participant runner. It must consume `VERIFORGE_PROVIDER_REQUEST_JSON` (or its
+`VERIFORGE_NATIVE_PARAMETERS_JSON` parameters), use the selected credential
+variable, call only the selected provider, parse the provider response, and
+write the task's declared outputs under `VERIFORGE_OUTPUT_DIR`. It must not ask
+the participant for provider names, native parameter fields, or another API
+key. A package that only exposes native parameters but has no executable task
+adapter is incomplete.
+
 Any string field that the scorer compares exactly (for example, rationale
 codes, statuses, or category labels) must have a closed codebook in `task.yaml`
 and in the Agent prompt. Do not leave exact-match vocabularies implicit in the
@@ -245,12 +265,13 @@ python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command ./03-run
 python 03-runner/run_task.py --model MODEL_ID --rolls 1 --agent-command -- ./03-runner/agent.sh
 ```
 
-The runner accepts `--workspace-source PATH` when the clean fixture/package
-source is not the generated package root, and `--scorer-command ...` for an
-optional scorer. The scorer runs in the same isolated roll workspace and gets
-`VERIFORGE_SCORER_RESULT` pointing to that roll's result file. Keep
-`--scorer-command` before `--agent-command`, because the latter consumes the
-remaining command-line tokens.
+The runner automatically discovers `03-runner/provider_agent.py` (or
+`agent_adapter.py`) and `02-evaluation/scorer.py` inside the generated package.
+`--workspace-source`, `--scorer-command`, and `--agent-command` remain
+developer-only overrides for debugging or adapter development; they are not
+part of the participant workflow. The generated scorer runs in the isolated
+roll workspace and receives `VERIFORGE_SCORER_RESULT` pointing to that roll's
+result file.
 
 The runner must print a non-secret progress message when each roll starts and
 finishes, report a bounded failure diagnostic, and enforce the profile's
@@ -360,6 +381,9 @@ an execution result; the top-level `benchmark_status` is always the literal
   logs under each roll directory.
 - Test every provider adapter's canonical-to-native parameter mapping and
   record the resolved native request in the roll manifest.
+- Test automatic adapter/scorer discovery with no participant command-line
+  overrides.
+- Test that a task-spec or declared fixture modification fails before scoring.
 - Run the reference-answer and malformed-output schema smoke tests before
   treating an adapter rollout as evidence.
 

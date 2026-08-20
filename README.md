@@ -8,6 +8,9 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 2. 评测资产：标答、fixture、rubric、验证器和评分器。
 3. 执行脚本：隔离 harness、Agent 调用、固定模型/超参、评分和 `N` 次 roll 聚合。
 
+生成的 participant 包必须同时包含 task-specific provider adapter、
+deterministic scorer 和 isolation manifest；参赛者不需要配置这些内部组件。
+
 skill 生成的每个任务包都直接是可运行的 `status: verified` 包。状态是固定
 的包元数据，不是参赛者或主办方需要流转的流程；rollout 分数和执行结果是
 唯一需要比较的运行指标。任务包不包含 `release` 或 `lifecycle` 配置。
@@ -86,9 +89,11 @@ runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 pro
 每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
 Agent 的 cwd；`outputs`、stdout/stderr 日志、scorer result、HOME、配置和
 缓存目录也都按 roll 分开。前一个 roll 在 workspace 中创建或修改的文件
-不会进入后一个 roll。若 source 不是默认生成包根目录，可显式传入
-`--workspace-source PATH`。可选的 `--scorer-command` 会在每个 roll 的
-workspace 中执行，并通过 `VERIFORGE_SCORER_RESULT` 接收该 roll 的结果路径。
+不会进入后一个 roll。runner 会自动发现生成包中的
+`03-runner/provider_agent.py` 和 `02-evaluation/scorer.py`，参赛者不需要
+传入 adapter 或 scorer 命令。`--workspace-source`、`--scorer-command` 和
+`--agent-command` 仅作为开发调试 override，并通过
+`VERIFORGE_SCORER_RESULT` 指向当前 roll 的结果路径。
 
 固定 profile 的统一参数不会直接冒充厂商参数。runner 内置 provider
 adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON`
@@ -96,6 +101,10 @@ adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON
 `reasoning.effort`/`max_output_tokens`，Anthropic 使用
 `output_config.effort`/`max_tokens`，Kimi、Qwen、DeepSeek Chat 使用
 `reasoning_effort`/`max_tokens`。任务 adapter 必须使用转换后的字段。
+
+生成包中的 `03-runner/isolation-manifest.yaml` 声明 fixture、只读和可写
+路径。runner 会在每个 roll 前后校验声明的 fixture 和 task spec；发现
+Agent 修改契约或输入 fixture 时，该 roll 会在评分前失败。
 
 runner 会把任务定义文件的绝对路径通过 `VERIFORGE_TASK_SPEC` 传给 adapter。
 adapter 必须把它复制到隔离工作目录，要求 Agent 先读取该文件，并在 prompt

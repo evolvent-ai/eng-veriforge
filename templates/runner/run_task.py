@@ -27,10 +27,11 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v1.6"
+RUNNER_VERSION = "veriforge-runner/v1.7"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
+ISOLATION_MANIFEST_VERSION = "veriforge-isolation-manifest/v1"
 CANONICAL_MODELS = {
     "kimi-k3": {
         "provider": "moonshot",
@@ -202,7 +203,107 @@ def catalog_hash(catalog: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def validate_task_spec(path: Path) -> None:
+def file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def tree_hash(root: Path) -> str:
+    """Hash a fixture tree by relative names and file contents."""
+    digest = hashlib.sha256()
+    if root.is_file():
+        digest.update(root.name.encode("utf-8"))
+        digest.update(root.read_bytes())
+        return digest.hexdigest()
+    if not root.is_dir():
+        return digest.hexdigest()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def load_isolation_manifest(workspace: Path, task_id: str) -> dict:
+    """Load generated isolation metadata, with a compatibility fallback."""
+    path = workspace / "03-runner" / "isolation-manifest.yaml"
+    if not path.is_file():
+        return {
+            "schema_version": ISOLATION_MANIFEST_VERSION,
+            "task_id": task_id,
+            "fixture_paths": ["02-evaluation/fixtures"],
+            "read_only_paths": ["02-evaluation/fixtures", "01-task/task.yaml"],
+            "mutable_paths": ["outputs"],
+            "manifest_path": None,
+        }
+    try:
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML in isolation manifest: {exc}") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != ISOLATION_MANIFEST_VERSION:
+        raise ValueError(f"isolation manifest must use {ISOLATION_MANIFEST_VERSION}")
+    if manifest.get("task_id") != task_id:
+        raise ValueError("isolation manifest task_id does not match the task")
+    for key in ("fixture_paths", "read_only_paths", "mutable_paths"):
+        values = manifest.get(key, ["02-evaluation/fixtures"] if key == "fixture_paths" else [])
+        if not isinstance(values, list) or not all(isinstance(path, str) for path in values):
+            raise ValueError(f"isolation manifest {key} must be a list of relative paths")
+        for relative in values:
+            if Path(relative).is_absolute() or ".." in Path(relative).parts:
+                raise ValueError(f"isolation manifest path escapes workspace: {relative}")
+        manifest[key] = values
+    fixture_paths = manifest["fixture_paths"]
+    manifest["manifest_path"] = str(path)
+    return manifest
+
+
+def fixture_hashes(workspace: Path, manifest: dict) -> dict[str, str]:
+    hashes = {}
+    for relative in manifest.get("fixture_paths", []):
+        path = workspace / relative
+        if path.exists():
+            hashes[relative] = tree_hash(path)
+    return hashes
+
+
+def resolve_agent_command(workspace: Path, explicit: list[str] | None) -> list[str]:
+    """Use the generated task adapter by default; explicit commands are for debugging."""
+    if explicit:
+        return explicit
+    candidates = (
+        workspace / "03-runner" / "provider_agent.py",
+        workspace / "03-runner" / "agent_adapter.py",
+        workspace / "03-runner" / "codex_agent.sh",
+        workspace / "03-runner" / "cc_agent.sh",
+        workspace / "03-runner" / "agent.sh",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            if candidate.suffix == ".py":
+                return [sys.executable, str(candidate)]
+            return [str(candidate)]
+    raise ValueError(
+        "no generated Agent adapter found; expected 03-runner/provider_agent.py "
+        "or 03-runner/agent_adapter.py"
+    )
+
+
+def resolve_scorer_command(workspace: Path, output_dir: Path, explicit: list[str] | None) -> list[str]:
+    """Use the generated deterministic scorer unless a developer override is supplied."""
+    if explicit:
+        return explicit
+    scorer = workspace / "02-evaluation" / "scorer.py"
+    if not scorer.is_file():
+        raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
+    return [sys.executable, str(scorer), "--outputs", str(output_dir)]
+
+
+def validate_generated_package(source: Path, explicit_agent: list[str] | None, explicit_scorer: list[str] | None) -> None:
+    """Fail preflight before a participant enters a key if generated tools are missing."""
+    resolve_agent_command(source, explicit_agent)
+    if explicit_scorer is None and not (source / "02-evaluation" / "scorer.py").is_file():
+        raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
+
+
+def validate_task_spec(path: Path) -> dict:
     """Require the generated package's single fixed benchmark status."""
     try:
         task = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -216,6 +317,7 @@ def validate_task_spec(path: Path) -> None:
         raise ValueError("task spec must set status: verified")
     if "release" in task or "lifecycle" in task:
         raise ValueError("task spec must not contain release or lifecycle metadata")
+    return task
 
 
 def choose_index(items: list[tuple[str, str]], label: str) -> str:
@@ -299,6 +401,8 @@ def build_environment(
     workspace: Path | None = None,
     output_dir: Path | None = None,
     roll_dir: Path | None = None,
+    fixtures_dir: Path | None = None,
+    isolation_manifest: Path | None = None,
 ) -> dict[str, str]:
     """Build a minimal child environment with explicit provider and roll paths."""
     native_parameters = build_provider_parameters(model, profile)
@@ -337,6 +441,10 @@ def build_environment(
         env["VERIFORGE_OUTPUT_DIR"] = str(output_dir.resolve())
     if roll_dir is not None:
         env["VERIFORGE_ROLL_DIR"] = str(roll_dir.resolve())
+    if fixtures_dir is not None:
+        env["VERIFORGE_FIXTURES_DIR"] = str(fixtures_dir.resolve())
+    if isolation_manifest is not None:
+        env["VERIFORGE_ISOLATION_MANIFEST"] = str(isolation_manifest.resolve())
     return env
 
 
@@ -440,9 +548,6 @@ def run_roll(
     task_spec_digest: str,
 ) -> dict:
     started = utc_now()
-    command = args.agent_command
-    if not command and not args.dry_run:
-        raise ValueError("an agent command is required unless --dry-run is used")
 
     roll_dir = args.results_dir.resolve() / f"roll-{index}"
     workspace = roll_dir / "workspace"
@@ -456,6 +561,20 @@ def run_roll(
 
     staged_spec = stage_workspace(args.workspace_source, workspace, args.task_spec)
     output_dir.mkdir(parents=True, exist_ok=True)
+    isolation_manifest = load_isolation_manifest(workspace, args.task_id)
+    fixture_before = fixture_hashes(workspace, isolation_manifest)
+    fixture_root = (
+        workspace / isolation_manifest["fixture_paths"][0]
+        if isolation_manifest.get("fixture_paths")
+        else workspace / "02-evaluation" / "fixtures"
+    )
+    staged_spec_hash = file_hash(staged_spec)
+    command = resolve_agent_command(workspace, args.agent_command) if not args.dry_run else None
+    scorer_command = (
+        resolve_scorer_command(workspace, output_dir, getattr(args, "scorer_command", None))
+        if not args.dry_run
+        else None
+    )
     native_parameters = build_provider_parameters(model, profile)
     provider_request = build_provider_request(model, profile)
     record = {
@@ -472,6 +591,10 @@ def run_roll(
         "runner_version": RUNNER_VERSION,
         "models_hash": config_digest,
         "task_spec_hash": task_spec_digest,
+        "staged_task_spec_hash": staged_spec_hash,
+        "fixture_hashes": fixture_before,
+        "fixture_paths": list(fixture_before),
+        "isolation_manifest": isolation_manifest.get("manifest_path"),
         "benchmark_status": "verified",
         "started_at": started,
         "roll_dir": str(roll_dir),
@@ -497,6 +620,12 @@ def run_roll(
         workspace=workspace,
         output_dir=output_dir,
         roll_dir=roll_dir,
+        fixtures_dir=fixture_root,
+        isolation_manifest=(
+            Path(isolation_manifest["manifest_path"])
+            if isolation_manifest.get("manifest_path")
+            else None
+        ),
     )
     env["VERIFORGE_SCORER_RESULT"] = str(roll_dir / "scorer-result.json")
     print(f"[veriforge] roll {index}/{args.rolls}: starting agent in {workspace}", flush=True)
@@ -515,7 +644,10 @@ def run_roll(
     record["agent_stdout_log"] = str(logs_dir / "agent.stdout.log")
     record["agent_stderr_log"] = str(logs_dir / "agent.stderr.log")
     record["returncode"] = returncode
-    record["status"] = "failed" if returncode != 0 else "passed"
+    record["task_spec_integrity"] = file_hash(staged_spec) == staged_spec_hash
+    record["fixture_integrity"] = fixture_hashes(workspace, isolation_manifest) == fixture_before
+    integrity_ok = record["task_spec_integrity"] and record["fixture_integrity"]
+    record["status"] = "failed" if returncode != 0 or not integrity_ok else "pending"
     if timed_out:
         record["timeout_seconds"] = profile.get("timeout_seconds")
     if returncode != 0:
@@ -528,8 +660,27 @@ def run_roll(
     else:
         print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
 
-    scorer_command = getattr(args, "scorer_command", None)
-    if scorer_command and returncode == 0:
+    if returncode != 0:
+        record["scorer_status"] = "skipped_agent_failed"
+        scorer_result_path.write_text(
+            json.dumps({"status": "failed", "reason": "agent failed before scoring"}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    elif not integrity_ok:
+        record["scorer_status"] = "skipped_integrity_failure"
+        scorer_result_path.write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": "task spec or fixture integrity changed during agent run",
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[veriforge] roll {index}/{args.rolls}: integrity check failed", flush=True)
+    elif scorer_command:
         print(f"[veriforge] roll {index}/{args.rolls}: scoring", flush=True)
         try:
             scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = run_command(
@@ -542,42 +693,36 @@ def run_roll(
             scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = 127, "", str(exc), False
         write_redacted_log(logs_dir / "scorer.stdout.log", scorer_stdout, credential)
         write_redacted_log(logs_dir / "scorer.stderr.log", scorer_stderr, credential)
-        if not scorer_result_path.exists():
-            scorer_result_path.write_text(
-                json.dumps(
-                    {
-                        "status": "failed" if scorer_returncode else "passed",
-                        "returncode": scorer_returncode,
-                        "timed_out": scorer_timed_out,
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-        else:
-            scorer_result_path.write_text(
-                redact_text(scorer_result_path.read_text(encoding="utf-8"), credential),
-                encoding="utf-8",
-            )
-        record["scorer_status"] = "failed" if scorer_returncode else "passed"
+        scorer_payload = None
+        scorer_source = scorer_result_path.read_text(encoding="utf-8") if scorer_result_path.exists() else scorer_stdout
+        try:
+            parsed = json.loads(scorer_source)
+            if isinstance(parsed, dict):
+                scorer_payload = parsed
+        except json.JSONDecodeError:
+            scorer_payload = None
+        if scorer_payload is None:
+            scorer_payload = {
+                "status": "failed",
+                "reason": "scorer did not emit a JSON object",
+                "returncode": scorer_returncode,
+            }
+        scorer_result_path.write_text(
+            json.dumps(scorer_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        record["scorer_status"] = "passed" if scorer_returncode == 0 and scorer_payload.get("passed") is True else "failed"
         record["scorer_returncode"] = scorer_returncode
+        record["score"] = scorer_payload.get("score")
+        record["passed"] = scorer_payload.get("passed") is True
         record["scorer_stdout_log"] = str(logs_dir / "scorer.stdout.log")
         record["scorer_stderr_log"] = str(logs_dir / "scorer.stderr.log")
-        if scorer_returncode != 0:
-            record["status"] = "failed"
-    else:
-        record["scorer_status"] = "not_configured" if not scorer_command else "skipped_agent_failed"
-        scorer_result_path.write_text(
-            json.dumps(
-                {
-                    "status": record["scorer_status"],
-                    "reason": "scorer command was not run",
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        record["status"] = "passed" if record["scorer_status"] == "passed" else "failed"
+        if scorer_timed_out:
+            record["scorer_timeout_seconds"] = profile.get("timeout_seconds")
+        print(
+            f"[veriforge] roll {index}/{args.rolls}: score={record.get('score')} status={record['status']}",
+            flush=True,
         )
     record["ended_at"] = utc_now()
     return record
@@ -636,10 +781,13 @@ def main() -> int:
             print(f"task spec not found: {args.task_spec}", file=sys.stderr)
             return 2
         raise ValueError(f"task spec not found: {args.task_spec}")
-    validate_task_spec(args.task_spec)
+    task = validate_task_spec(args.task_spec)
+    if args.task_id == "unversioned-task" and isinstance(task.get("task_id"), str):
+        args.task_id = task["task_id"]
     args.workspace_source = (args.workspace_source or infer_workspace_source(args.task_spec)).resolve()
     if not args.workspace_source.is_dir():
         raise ValueError(f"workspace source not found: {args.workspace_source}")
+    validate_generated_package(args.workspace_source, args.agent_command, args.scorer_command)
     if args.preflight:
         # Credential mode is per_selected_model. A matrix-only preflight may
         # report all five variables, but only an explicitly selected model can

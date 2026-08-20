@@ -102,6 +102,10 @@ class CanonicalMatrixTests(unittest.TestCase):
                 yaml.safe_dump({"schema_version": "veriforge-task/v1", "task_id": "example-activity-v1", "status": "verified"}),
                 encoding="utf-8",
             )
+            (directory / "03-runner").mkdir()
+            (directory / "03-runner" / "provider_agent.py").write_text("", encoding="utf-8")
+            (directory / "02-evaluation").mkdir()
+            (directory / "02-evaluation" / "scorer.py").write_text("", encoding="utf-8")
             env = os.environ.copy()
             for variable in (model["credential_env"] for model in self.matrix["models"]):
                 env.pop(variable, None)
@@ -154,22 +158,29 @@ class CanonicalMatrixTests(unittest.TestCase):
             root = Path(temp)
             source = root / "package"
             (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 100, 'passed': True}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "import os; from pathlib import Path; "
+                "seen=Path('marker.txt').exists(); "
+                "print(f'marker-existed={seen} key={os.environ.get(\"OPENAI_API_KEY\")}'); "
+                "Path('marker.txt').write_text('created', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
             task_spec = source / "01-task" / "task.yaml"
             task_spec.write_text("status: verified\n", encoding="utf-8")
             results = root / "results"
             selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
             profile = selected["profiles"][0]
-            script = (
-                "import os; from pathlib import Path; "
-                "seen=Path('marker.txt').exists(); "
-                "print(f'marker-existed={seen} key={os.environ.get(\"OPENAI_API_KEY\")}'); "
-                "Path('marker.txt').write_text('created', encoding='utf-8')"
-            )
             args = type(
                 "Args",
                 (),
                 {
-                    "agent_command": [sys.executable, "-c", script],
+                    "agent_command": None,
                     "dry_run": False,
                     "task_id": "isolation-test",
                     "rolls": 2,
@@ -192,7 +203,47 @@ class CanonicalMatrixTests(unittest.TestCase):
             self.assertTrue(staged_spec.exists())
             self.assertEqual(staged_spec.stat().st_mode & stat.S_IWUSR, 0)
             self.assertTrue(Path(first["agent_stderr_log"]).exists())
-            self.assertEqual(json.loads(Path(second["scorer_result"]).read_text())["status"], "not_configured")
+            self.assertEqual(json.loads(Path(second["scorer_result"]).read_text())["passed"], True)
+            self.assertEqual(second["score"], 100)
+
+    def test_task_spec_modification_fails_before_scorer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "package"
+            (source / "01-task").mkdir(parents=True)
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text(
+                "import json; print(json.dumps({'score': 100, 'passed': True}))\n",
+                encoding="utf-8",
+            )
+            (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text(
+                "import os; from pathlib import Path; "
+                "p=Path(os.environ['VERIFORGE_TASK_SPEC']); "
+                "p.chmod(0o600); p.write_text('status: verified\\nchanged: true\\n')\n",
+                encoding="utf-8",
+            )
+            task_spec = source / "01-task" / "task.yaml"
+            task_spec.write_text("status: verified\n", encoding="utf-8")
+            selected = next(model for model in self.matrix["models"] if model["id"] == "gpt-5.6-sol")
+            args = type(
+                "Args",
+                (),
+                {
+                    "agent_command": None,
+                    "dry_run": False,
+                    "task_id": "integrity-test",
+                    "rolls": 1,
+                    "task_spec": task_spec,
+                    "workspace_source": source,
+                    "results_dir": root / "results",
+                    "scorer_command": None,
+                },
+            )()
+            record = RUNNER.run_roll(selected, selected["profiles"][0], "runtime-secret", args, 1, "catalog", "task")
+            self.assertFalse(record["task_spec_integrity"])
+            self.assertEqual(record["scorer_status"], "skipped_integrity_failure")
+            self.assertEqual(record["status"], "failed")
 
     def test_main_writes_per_roll_manifest_from_clean_source(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -200,6 +251,9 @@ class CanonicalMatrixTests(unittest.TestCase):
             source = root / "package"
             (source / "01-task").mkdir(parents=True)
             (source / "03-runner").mkdir()
+            (source / "03-runner" / "provider_agent.py").write_text("", encoding="utf-8")
+            (source / "02-evaluation").mkdir()
+            (source / "02-evaluation" / "scorer.py").write_text("", encoding="utf-8")
             task_spec = source / "01-task" / "task.yaml"
             task_spec.write_text("status: verified\n", encoding="utf-8")
             matrix_path = self.write_matrix(source / "03-runner", self.matrix)
