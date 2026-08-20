@@ -76,11 +76,9 @@ Reject any activity matrix with extra profiles, participant parameters, or
 unresolved placeholders. The participant workflow exposes only model
 selection, rollout count, and runtime API-key input.
 
-If the organizer wants one API Key prompt for all five models, use
-`credential_mode: single_runtime_key` only when all models are served by the
-same confirmed gateway and share one credential environment variable. Otherwise
-use `per_selected_model`; the participant still enters only one key for the
-model selected in that run.
+The activity credential mode is fixed to `per_selected_model`: each selected
+model has its own credential environment variable, and the participant enters
+only the key for the model selected in that run.
 
 If the user only has an idea, propose one or more measurable task versions and
 identify missing evidence, then generate the complete package with

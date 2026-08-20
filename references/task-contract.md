@@ -129,15 +129,15 @@ organizer_controls:
   participant_model_choice_only: true
   fixed_model_count: 5
   fixed_profile_only: true
-  credential_mode: per_selected_model # or single_runtime_key
+  credential_mode: per_selected_model
 ```
 
 When this block is present, the runner requires exactly the declared number of
 models, rejects `REPLACE_WITH_*` values, and rejects participant profile or
-parameter overrides. `single_runtime_key` additionally requires a confirmed
-`organizer_controls.credential_env` and the same `credential_env` on every
-model. The lock is a task-package policy; a competition distributor should
-also publish an artifact checksum or otherwise prevent participants from
+parameter overrides. The activity credential mode is fixed to
+`per_selected_model`, so each selected model uses its own confirmed
+`credential_env`. The lock is a task-package policy; a competition distributor
+should also publish an artifact checksum or otherwise prevent participants from
 editing `models.yaml` after distribution.
 
 The activity matrix uses one immutable `default` profile per model. The fixed

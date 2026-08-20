@@ -135,14 +135,8 @@ def load_catalog(path: Path) -> dict:
                 if not isinstance(value, str) or not value.strip() or PLACEHOLDER_MARKER in value:
                     raise ValueError(f"locked activity model {model['id']} needs a confirmed {field}")
         credential_mode = organizer_controls.get("credential_mode", "per_selected_model")
-        if credential_mode not in {"per_selected_model", "single_runtime_key"}:
-            raise ValueError("organizer_controls.credential_mode is invalid")
-        if credential_mode == "single_runtime_key":
-            shared_env = organizer_controls.get("credential_env")
-            if not isinstance(shared_env, str) or not shared_env or PLACEHOLDER_MARKER in shared_env:
-                raise ValueError("single_runtime_key requires a confirmed organizer_controls.credential_env")
-            if any(model.get("credential_env") != shared_env for model in models):
-                raise ValueError("all models must use organizer_controls.credential_env in single_runtime_key mode")
+        if credential_mode != "per_selected_model":
+            raise ValueError("organizer_controls.credential_mode must be per_selected_model")
 
     return catalog
 
