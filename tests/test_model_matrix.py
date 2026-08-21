@@ -82,13 +82,13 @@ class CanonicalMatrixTests(unittest.TestCase):
     def test_harness_filters_model_choices_without_changing_selection_flow(self):
         args = type("Args", (), {"harness_id": "cc", "preflight": True, "model": None, "interactive": False})()
         models = RUNNER.resolve_models(self.matrix, args)
-        self.assertEqual({model["id"] for model in models}, {"claude-opus-5", "kimi-k3"})
-        args.harness_id = "codex"
-        models = RUNNER.resolve_models(self.matrix, args)
         self.assertEqual(
             {model["id"] for model in models},
-            {"gpt-5.6-sol", "qwen3.8-max", "deepseek-v4-pro"},
+            {"claude-opus-5", "kimi-k3", "qwen3.8-max", "deepseek-v4-pro"},
         )
+        args.harness_id = "codex"
+        models = RUNNER.resolve_models(self.matrix, args)
+        self.assertEqual({model["id"] for model in models}, {"gpt-5.6-sol"})
 
     def test_every_model_protocol_matches_its_harness(self):
         """Codex 只接受 Responses 协议，CC 只接受 Anthropic 协议。
@@ -276,6 +276,105 @@ class CanonicalMatrixTests(unittest.TestCase):
                 self.assertEqual(parameters["reasoning_effort"], expected[model["id"]])
                 self.assertEqual(parameters["max_output_tokens"], RUNNER.FIXED_MAX_OUTPUT_TOKENS)
 
+    def test_choose_rolls_accepts_default_and_rejects_out_of_range(self):
+        """rollout 次数交互选择：回车用默认、越界重问、非法输入重问。"""
+        import builtins
+        from unittest import mock
+
+        cases = [
+            (["\n"], 3),          # 直接回车 -> 默认
+            (["5"], 5),           # 合法值
+            (["99", "2"], 2),     # 越界后重输
+            (["abc", "1"], 1),    # 非法输入后重输
+            (["0", "10"], 10),    # 低于下界后重输
+        ]
+        for answers, expected in cases:
+            with self.subTest(answers=answers):
+                with mock.patch.object(builtins, "input", side_effect=answers):
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(RUNNER.choose_rolls(1, 10, 3), expected)
+
+    def test_wrapper_defers_rollout_choice_to_interactive_flow(self):
+        """包装脚本不再写死 3 次；无参数时把次数交给交互流程。"""
+        wrapper = WRAPPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("3. 选择 rollout 次数", wrapper)
+        self.assertIn("exec python3 03-runner/run_task.py --interactive\n", wrapper)
+        runner_src = RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("rolls_from_cli", runner_src)
+
+    def test_output_symlinks_are_rejected(self):
+        """outputs/ 属于 mutable_paths，被完整性哈希跳过，因此符号链接不受约束。
+        Agent 可以把 result.json 软链到 workspace 外，让 scorer 读到不受约束的
+        内容并拿到分数——必须在评分前拒绝。"""
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp) / "outputs"
+            (output_dir / "nested").mkdir(parents=True)
+            (output_dir / "result.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(RUNNER.find_output_symlinks(output_dir), [])
+
+            outside = Path(temp) / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            (output_dir / "leak.json").symlink_to(outside)
+            (output_dir / "nested" / "deep.json").symlink_to(outside)
+            self.assertEqual(
+                RUNNER.find_output_symlinks(output_dir),
+                ["leak.json", "nested/deep.json"],
+            )
+
+    def test_cc_workspace_settings_deny_absolute_paths(self):
+        """CC 的项目级 deny 无法被 allow 覆盖，用它锁死绝对路径读写。"""
+        deny = RUNNER.CC_WORKSPACE_SETTINGS["permissions"]["deny"]
+        self.assertEqual(sorted(deny), ["Edit(//**)", "Read(//**)", "Write(//**)"])
+        runner_src = RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn('workspace / ".claude" / "settings.json"', runner_src)
+
+    def test_codex_config_pins_sandbox_and_approval(self):
+        """approval_policy = never 是唯一不依赖 Landlock 的一项：
+        自动批准会把沙箱拦下的命令放行到沙箱外重试，必须断掉。"""
+        codex = CODEX_AGENT_PATH.read_text(encoding="utf-8")
+        self.assertIn('sandbox_mode = "workspace-write"', codex)
+        self.assertIn('approval_policy = "never"', codex)
+        self.assertIn("writable_roots = []", codex)
+        self.assertIn("exclude_slash_tmp = true", codex)
+        self.assertIn("exclude_tmpdir_env_var = true", codex)
+        self.assertIn("network_access = false", codex)
+        # 命令行 --approve-for-me 优先级高于 config.toml，会覆盖 approval_policy
+        self.assertNotIn("--approve-for-me", codex)
+
+    def test_both_harnesses_pin_one_million_context(self):
+        """上下文窗口统一 1M 且必须显式下发。
+        CC 对无法识别的模型默认只按 200K 计算，不显式声明会让不带 [1m] 后缀的
+        模型被砍到实际能力的 1/5，跨模型分数不可比。"""
+        self.assertEqual(RUNNER.FIXED_CONTEXT_WINDOW, 1_000_000)
+        self.assertEqual(RUNNER.FIXED_AUTO_COMPACT_LIMIT, 900_000)
+
+        codex = CODEX_AGENT_PATH.read_text(encoding="utf-8")
+        self.assertIn("model_context_window = $context_window", codex)
+        self.assertIn("model_auto_compact_token_limit = $auto_compact_limit", codex)
+        # 重试显式写死，不依赖会随版本变化的 CLI 默认值
+        self.assertIn("request_max_retries = 4", codex)
+        self.assertIn("stream_max_retries = 5", codex)
+
+        cc = (ROOT / "templates" / "runner" / "cc_agent.sh").read_text(encoding="utf-8")
+        self.assertIn("export CLAUDE_CODE_MAX_CONTEXT_TOKENS", cc)
+        self.assertIn("export CLAUDE_CODE_AUTO_COMPACT_WINDOW", cc)
+
+        env = RUNNER.build_environment(
+            self.matrix["models"][0], self.matrix["models"][0]["profiles"][0], None, Path("task.yaml")
+        )
+        self.assertEqual(env["VERIFORGE_CONTEXT_WINDOW"], "1000000")
+        self.assertEqual(env["VERIFORGE_AUTO_COMPACT_LIMIT"], "900000")
+
+    def test_agent_and_scorer_timeouts_are_independent(self):
+        """Agent 超时 2 小时，scorer 用独立短超时。
+        若 scorer 复用 Agent 超时，一个死循环的 scorer 会拖满 2 小时才被发现。"""
+        for model in self.matrix["models"]:
+            with self.subTest(model=model["id"]):
+                self.assertEqual(model["profiles"][0]["timeout_seconds"], 7200)
+        self.assertEqual(RUNNER.SCORER_TIMEOUT_SECONDS, 300)
+        runner_src = RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("timeout=SCORER_TIMEOUT_SECONDS", runner_src)
+
     def test_harness_adapters_read_effort_from_profile(self):
         """推理档必须来自 profile，不能硬编码。
         写死档位会让 models.yaml 的固定参数失效，实际运行档位与矩阵声明不一致，
@@ -297,9 +396,9 @@ class CanonicalMatrixTests(unittest.TestCase):
             "claude-opus-5": {"output_config": {"effort": "max"}, "max_tokens": 32768},
             # gpt-5.6-sol 的最高档是 xhigh，不是 max
             "gpt-5.6-sol": {"reasoning": {"effort": "xhigh"}, "max_output_tokens": 32768},
-            "qwen3.8-max": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
+            "qwen3.8-max": {"output_config": {"effort": "max"}, "max_tokens": 32768},
             "kimi-k3": {"output_config": {"effort": "max"}, "max_tokens": 32768},
-            "deepseek-v4-pro": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
+            "deepseek-v4-pro": {"output_config": {"effort": "max"}, "max_tokens": 32768},
         }
         for model in self.matrix["models"]:
             with self.subTest(model=model["id"]):
