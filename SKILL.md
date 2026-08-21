@@ -303,8 +303,13 @@ generated scorer runs from a trusted read-only evaluation copy outside the
 Agent workspace. Its stdout is the sole authoritative JSON result; the runner
 writes that payload to the roll result file after verifying scorer integrity.
 
-The runner must print a non-secret progress message when each roll starts and
-finishes, report a bounded failure diagnostic, and enforce the profile's
+The runner must print `step 1/6` through `step 6/6` progress for each roll,
+stream secret-redacted Agent stdout/stderr and scorer stderr, retain the full
+scorer stdout in the persisted log, and print a bounded
+heartbeat while a child process is still running without output. Codex and
+Claude adapters should use their structured event streams so tool calls, file
+operations, and command execution summaries are visible in the terminal. The
+runner must also report a bounded failure diagnostic and enforce the profile's
 `timeout_seconds`. Redirecting all child output and leaving the participant
 with no progress signal is not an acceptable runner UX.
 Task-specific adapters must propagate a non-zero Agent exit code and retain a

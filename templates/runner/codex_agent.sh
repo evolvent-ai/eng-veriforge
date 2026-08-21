@@ -85,4 +85,5 @@ exec "$codex_bin" exec \
   --cd "$PWD" \
   --model "$VERIFORGE_MODEL_NAME" \
   --approve-for-me \
+  --json \
   - < "$prompt_file"

@@ -232,6 +232,12 @@ paths for the roll workspace, output directory, stdout/stderr logs, and scorer
 result. It must not contain secret values or credential environment variable
 values.
 
+During execution the participant terminal should show numbered roll steps,
+secret-redacted Agent stream output, scorer diagnostics/final score, and a
+periodic heartbeat when a child process is still running without output. The
+persisted stdout/stderr log files remain the complete audit records; terminal
+rendering is only a live progress view.
+
 The canonical profile is translated before the Agent adapter runs. The built-in
 provider mappings are:
 

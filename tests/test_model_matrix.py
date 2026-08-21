@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
+import io
 import importlib.util
 import json
 import os
@@ -231,6 +233,11 @@ class CanonicalMatrixTests(unittest.TestCase):
         script = CODEX_AGENT_PATH.read_text(encoding="utf-8")
         self.assertIn('export CODEX_API_KEY="$VERIFORGE_API_KEY"', script)
         self.assertIn('export OPENAI_API_KEY="$VERIFORGE_API_KEY"', script)
+        self.assertIn("--json \\", script)
+
+    def test_cc_harness_uses_streaming_output(self):
+        script = (ROOT / "templates" / "runner" / "cc_agent.sh").read_text(encoding="utf-8")
+        self.assertIn("--output-format stream-json", script)
 
     def test_provider_adapters_translate_canonical_parameters(self):
         expected = {
@@ -667,6 +674,35 @@ class CanonicalMatrixTests(unittest.TestCase):
             self.assertTrue(timed_out)
             self.assertEqual(marker.read_text(), "yes")
             self.assertLess(elapsed, 3)
+
+    def test_run_command_streams_redacted_progress_and_preserves_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "stream.py"
+            script.write_text(
+                "import json, sys; "
+                "print(json.dumps({'type': 'item.started', 'item': {'type': 'command_execution', 'command': 'echo secret-token'}}), flush=True); "
+                "print('secret-token', file=sys.stderr, flush=True)\n",
+                encoding="utf-8",
+            )
+            terminal = io.StringIO()
+            with redirect_stdout(terminal):
+                returncode, stdout, stderr, timed_out = RUNNER.run_command(
+                    [sys.executable, str(script)],
+                    cwd=Path(temp),
+                    env={"PATH": os.environ.get("PATH", "")},
+                    timeout=2,
+                    live_label="roll 1 agent",
+                    credential="secret-token",
+                    heartbeat_seconds=0.1,
+                )
+            self.assertEqual(returncode, 0)
+            self.assertFalse(timed_out)
+            self.assertIn("secret-token", stdout)
+            self.assertIn("secret-token", stderr)
+            self.assertIn("[veriforge][roll 1 agent][stdout]", terminal.getvalue())
+            self.assertIn("item.started command_execution", terminal.getvalue())
+            self.assertIn("<redacted>", terminal.getvalue())
+            self.assertNotIn("secret-token", terminal.getvalue())
 
     def test_task_spec_modification_fails_before_scorer(self):
         with tempfile.TemporaryDirectory() as temp:

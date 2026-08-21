@@ -103,8 +103,12 @@ python 03-runner/run_task.py --developer-mode --model MODEL_ID --rolls 1 --agent
 `--agent-command`、`--scorer-command` 和 `--workspace-source` 只在显式
 `--developer-mode` 下可用；participant workflow 会拒绝这些 override。
 
-runner 会在每个 roll 开始和结束时打印非敏感进度，并使用 profile 中的
-`timeout_seconds` 限制单次 Agent 运行。所选模型的 API Key 只在运行时隐藏输入
+runner 会为每个 roll 打印 `step 1/6` 到 `step 6/6` 的阶段进度，并实时转发
+经过脱敏的 Agent stdout/stderr 和 scorer stderr；scorer 的完整 stdout 保存在日志文件，
+终端只显示最终分数，避免完整 JSON 淹没 Agent 过程。如果子进程暂时没有输出，每 15 秒打印
+一次仍在运行的心跳。Codex/Claude harness 使用结构化事件流，因此终端会显示
+工具调用、文件操作和命令执行摘要。runner 使用 profile 中的 `timeout_seconds`
+限制单次 Agent 运行。所选模型的 API Key 只在运行时隐藏输入
 或从内部映射的环境变量读取，绝不会写入配置、manifest 或错误日志。Agent adapter 必须
 传播非零退出码，并保留经过脱敏的有限 stdout/stderr 诊断，不能把失败
 重定向到 `/dev/null`。Codex harness 会为每个 roll 注入所选模型的临时 provider

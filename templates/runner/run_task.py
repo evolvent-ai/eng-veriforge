@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 import getpass
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import subprocess
 import sys
 import re
@@ -17,6 +19,8 @@ import shutil
 import signal
 import stat
 import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 
 try:
@@ -916,14 +920,67 @@ def write_redacted_log(path: Path, text: str | bytes | None, credential: str | N
     path.write_text(redact_text(_as_text(text), credential), encoding="utf-8")
 
 
+def _event_summary(payload: dict) -> str:
+    """Turn common Codex/Claude stream events into concise terminal progress."""
+    event_type = str(payload.get("type", "event"))
+    item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+    item_type = str(item.get("type", ""))
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else None
+    content = message.get("content") if message else None
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type", ""))
+            if block_type in {"tool_use", "tool_result"}:
+                name = block.get("name") or block.get("tool_name") or block.get("id")
+                return f"{event_type} {block_type}: {name}" if name else f"{event_type} {block_type}"
+            if block_type in {"text", "thinking"} and isinstance(block.get("text"), str):
+                compact = " ".join(block["text"].split())
+                return f"{event_type} {block_type}: {compact[:500]}"
+    block = payload.get("content_block") if isinstance(payload.get("content_block"), dict) else None
+    if block and block.get("type") in {"tool_use", "tool_result"}:
+        name = block.get("name") or block.get("tool_name") or block.get("id")
+        return f"{event_type} {block['type']}: {name}" if name else f"{event_type} {block['type']}"
+    if item_type in {"command_execution", "bash", "shell_command"}:
+        command = item.get("command") or item.get("input") or item.get("cmd")
+        return f"{event_type} {item_type}: {str(command).strip()}" if command else f"{event_type} {item_type}"
+    if item_type in {"file_change", "file_read", "tool_use", "tool_result"}:
+        name = item.get("name") or item.get("tool_name") or item.get("path") or item.get("file")
+        return f"{event_type} {item_type}: {name}" if name else f"{event_type} {item_type}"
+    text = item.get("text") or item.get("delta") or payload.get("text")
+    if isinstance(text, str) and text.strip():
+        compact = " ".join(text.split())
+        return f"{event_type}: {compact[:500]}"
+    return event_type if event_type != "event" else json.dumps(payload, ensure_ascii=False)[:500]
+
+
+def _live_line(line: str) -> str:
+    """Format one child-process line without hiding raw non-JSON output."""
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return stripped
+    if isinstance(payload, dict):
+        return _event_summary(payload)
+    return stripped
+
+
 def run_command(
     command: list[str],
     *,
     cwd: Path,
     env: dict[str, str],
     timeout: int | float | None,
+    live_label: str | None = None,
+    credential: str | None = None,
+    heartbeat_seconds: int | float | None = None,
+    stream_stdout: bool = True,
 ) -> tuple[int, str, str, bool]:
-    """Run one command and terminate its process group on timeout."""
+    """Run one command, stream progress, and terminate its process group on timeout."""
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -931,12 +988,37 @@ def run_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
         start_new_session=(os.name == "posix"),
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-        return process.returncode, stdout or "", stderr or "", False
-    except subprocess.TimeoutExpired as exc:
+
+    streams: Queue[tuple[str, str | None]] = Queue()
+
+    def pump(name: str, stream) -> None:
+        try:
+            for line in iter(stream.readline, ""):
+                streams.put((name, line))
+        finally:
+            with suppress(Exception):
+                stream.close()
+            streams.put((name, None))
+
+    threads = [
+        threading.Thread(target=pump, args=(name, stream), daemon=True)
+        for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+    ]
+    for thread in threads:
+        thread.start()
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    finished_streams: set[str] = set()
+    started = time.monotonic()
+    deadline = started + float(timeout) if timeout is not None else None
+    next_heartbeat = started + float(heartbeat_seconds) if heartbeat_seconds else None
+    timed_out = False
+
+    def stop_process() -> None:
         if os.name == "posix":
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -945,8 +1027,8 @@ def run_command(
         else:  # pragma: no cover - Windows is not the supported local harness
             process.kill()
         try:
-            stdout, stderr = process.communicate(timeout=1)
-        except subprocess.TimeoutExpired as second:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
             if os.name == "posix":
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -954,10 +1036,54 @@ def run_command(
                     pass
             else:  # pragma: no cover - Windows is not the supported local harness
                 process.kill()
-            stdout, stderr = process.communicate()
-            stdout = _as_text(second.stdout) + _as_text(stdout)
-            stderr = _as_text(second.stderr) + _as_text(stderr)
-        return 124, _as_text(exc.stdout) + _as_text(stdout), _as_text(exc.stderr) + _as_text(stderr), True
+            process.wait()
+
+    while len(finished_streams) < 2:
+        now = time.monotonic()
+        if deadline is not None and not timed_out and now >= deadline and process.poll() is None:
+            timed_out = True
+            if live_label:
+                print(f"[veriforge][{live_label}] timeout reached; sending SIGTERM", flush=True)
+            stop_process()
+            if live_label:
+                print(f"[veriforge][{live_label}] process stopped after timeout escalation", flush=True)
+        if (
+            live_label
+            and next_heartbeat is not None
+            and now >= next_heartbeat
+            and process.poll() is None
+        ):
+            elapsed = int(now - started)
+            limit = f"/{int(timeout)}s" if timeout is not None else ""
+            print(f"[veriforge][{live_label}] still running ({elapsed}s{limit})", flush=True)
+            next_heartbeat = now + float(heartbeat_seconds)
+        wait_for = 0.25
+        if next_heartbeat is not None:
+            wait_for = min(wait_for, max(0.01, next_heartbeat - now))
+        if deadline is not None and not timed_out:
+            wait_for = min(wait_for, max(0.01, deadline - now))
+        try:
+            name, line = streams.get(timeout=wait_for)
+        except Empty:
+            continue
+        if line is None:
+            finished_streams.add(name)
+            continue
+        if name == "stdout":
+            stdout_parts.append(line)
+        else:
+            stderr_parts.append(line)
+        if live_label and (name == "stderr" or stream_stdout):
+            rendered = redact_text(_live_line(line), credential)
+            if rendered:
+                print(f"[veriforge][{live_label}][{name}] {rendered}", flush=True)
+
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=1)
+    for thread in threads:
+        thread.join(timeout=1)
+    returncode = 124 if timed_out else process.returncode
+    return returncode, "".join(stdout_parts), "".join(stderr_parts), timed_out
 
 
 def run_roll(
@@ -972,6 +1098,9 @@ def run_roll(
 ) -> dict:
     started = utc_now()
 
+    def step(number: int, message: str) -> None:
+        print(f"[veriforge] roll {index}/{args.rolls} step {number}/6: {message}", flush=True)
+
     roll_dir = args.results_dir.resolve() / f"roll-{index}"
     workspace = roll_dir / "workspace"
     output_dir = workspace / "outputs"
@@ -979,6 +1108,7 @@ def run_roll(
     scorer_result_path = roll_dir / "scorer-result.json"
     roll_dir.mkdir(parents=True, exist_ok=False)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    step(1, "prepare isolated roll and benchmark integrity controls")
     for private_dir in (roll_dir / "home", roll_dir / "config", roll_dir / "cache"):
         private_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1070,6 +1200,7 @@ def run_roll(
         "scorer_result": str(scorer_result_path),
         "status": "dry_run" if args.dry_run else "pending",
     }
+    step(2, "stage Agent workspace, fixtures, and trusted evaluation copy")
     if args.dry_run:
         scorer_result_path.write_text(
             json.dumps({"status": "not_run", "reason": "dry_run"}, indent=2) + "\n",
@@ -1095,13 +1226,16 @@ def run_roll(
         ),
         harness=harness,
     )
-    print(f"[veriforge] roll {index}/{args.rolls}: starting agent in {workspace}", flush=True)
+    step(3, f"start {(harness or {}).get('display_name', 'Agent')} in {workspace}")
     try:
         returncode, stdout, stderr, timed_out = run_command(
             command,
             cwd=workspace,
             env=env,
             timeout=profile.get("timeout_seconds"),
+            live_label=f"roll {index} agent",
+            credential=credential,
+            heartbeat_seconds=15,
         )
     except OSError as exc:
         returncode, stdout, stderr, timed_out = 127, "", str(exc), False
@@ -1141,6 +1275,7 @@ def run_roll(
     record["status"] = "failed" if returncode != 0 or not integrity_ok else "pending"
     if timed_out:
         record["timeout_seconds"] = profile.get("timeout_seconds")
+    step(4, "collect Agent output and verify task, fixture, source, evaluation, and workspace integrity")
     if returncode != 0:
         for stream_name, stream in (("stdout", stdout), ("stderr", stderr)):
             diagnostic = redact_diagnostic(stream or "", credential)
@@ -1152,12 +1287,14 @@ def run_roll(
         print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
 
     if returncode != 0:
+        step(5, "skip scorer because Agent exited with a non-zero status")
         record["scorer_status"] = "skipped_agent_failed"
         scorer_result_path.write_text(
             json.dumps({"status": "failed", "reason": "agent failed before scoring"}, indent=2) + "\n",
             encoding="utf-8",
         )
     elif not integrity_ok:
+        step(5, "skip scorer because an integrity check failed")
         record["scorer_status"] = "skipped_integrity_failure"
         scorer_result_path.write_text(
             json.dumps(
@@ -1172,6 +1309,7 @@ def run_roll(
         )
         print(f"[veriforge] roll {index}/{args.rolls}: integrity check failed", flush=True)
     elif scorer_command:
+        step(5, "run trusted scorer and stream scorer diagnostics")
         print(f"[veriforge] roll {index}/{args.rolls}: scoring", flush=True)
         # The Agent can see the roll directory in legacy/custom adapters. Any
         # pre-existing result is untrusted; scorer stdout is authoritative.
@@ -1187,6 +1325,10 @@ def run_roll(
                 cwd=evaluation_dir,
                 env=scorer_env,
                 timeout=profile.get("timeout_seconds"),
+                live_label=f"roll {index} scorer",
+                credential=credential,
+                heartbeat_seconds=15,
+                stream_stdout=False,
             )
         except OSError as exc:
             scorer_returncode, scorer_stdout, scorer_stderr, scorer_timed_out = 127, "", str(exc), False
@@ -1236,6 +1378,9 @@ def run_roll(
             f"[veriforge] roll {index}/{args.rolls}: score={record.get('score')} status={record['status']}",
             flush=True,
         )
+    else:
+        step(5, "skip scorer because Agent failed or integrity check failed")
+    step(6, f"finish roll: {record.get('status', 'failed')}")
     remove_evaluation_source(evaluation_dir)
     record["ended_at"] = utc_now()
     return record
