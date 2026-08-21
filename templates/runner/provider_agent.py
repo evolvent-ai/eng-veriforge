@@ -356,6 +356,8 @@ def run_chat_tool_loop(
                     raise ValueError("tool arguments must be an object")
                 result = execute_tool(name, arguments, fixtures, output_dir)
                 trace_event(trace_file, {"type": "tool_result", "round": round_index, "tool": name, "ok": True, "result_sha256": hashlib.sha256(result.encode()).hexdigest()}, credential)
+                if name == "write_output":
+                    trace_event(trace_file, {"type": "file_write", "round": round_index, "name": arguments.get("name")}, credential)
             except (ValueError, OSError, json.JSONDecodeError) as exc:
                 result = json.dumps({"error": redact(str(exc), credential)}, ensure_ascii=False)
                 trace_event(trace_file, {"type": "tool_result", "round": round_index, "tool": name, "ok": False, "error": redact(str(exc), credential)}, credential)
