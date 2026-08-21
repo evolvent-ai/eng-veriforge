@@ -1,0 +1,46 @@
+schema_version: "veriforge-harness-allowlist/v1"
+task_id: "example-task-v1"
+
+# 生成期必须由用户逐项确认后才能置为 true。
+confirmed_by_user: false
+
+# 默认基线只有两个 harness CLI。只有通过 --version/--help 只读检查
+# 且经用户确认的能力才能写进来；缺失、未确认或权限过宽的一律不进。
+cli:
+  - name: "claude"
+    purpose: "Claude Code harness"
+  - name: "codex"
+    purpose: "Codex CLI harness"
+
+mcps: []
+skills: []
+
+# 挂载路径相对任务包根目录，不允许绝对个人路径或 home 目录。
+mounts:
+  - path: "02-evaluation/fixtures"
+    mode: read_only
+  - path: "outputs"
+    mode: read_write
+
+# 只声明变量名，绝不写入值。
+environment:
+  - name: "WODEX_API_KEY"
+    required: false
+    secret: true
+    runtime_only: true
+  - name: "DASHSCOPE_API_KEY"
+    required: false
+    secret: true
+    runtime_only: true
+  - name: "MOONSHOT_API_KEY"
+    required: false
+    secret: true
+    runtime_only: true
+  - name: "DEEPSEEK_API_KEY"
+    required: false
+    secret: true
+    runtime_only: true
+
+network:
+  mode: deny_by_default
+  allowed_domains: []

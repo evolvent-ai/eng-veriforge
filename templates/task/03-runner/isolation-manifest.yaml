@@ -1,0 +1,20 @@
+schema_version: "veriforge-isolation-manifest/v1"
+
+# 必须与 task.yaml、rubric.yaml 的 task_id 一致，否则 runner 拒绝加载。
+task_id: "example-task-v1"
+
+# 所有路径相对于暂存后的 Agent workspace，不能逃逸出 workspace，
+# 也不能是 workspace 根目录本身。read_only 与 mutable 不允许重叠。
+
+fixture_paths:
+  - "02-evaluation/fixtures"
+
+# runner 在每次 roll 前后哈希这些路径，任何改动都会在评分前判失败。
+# 任务定义文件必须出现在这里。
+read_only_paths:
+  - "02-evaluation/fixtures"
+  - "01-task/task.yaml"
+
+# 唯一允许 Agent 写入的位置，必须覆盖 task.yaml 的 required_output.path。
+mutable_paths:
+  - "outputs"

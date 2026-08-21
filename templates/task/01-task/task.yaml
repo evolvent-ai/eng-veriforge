@@ -1,0 +1,67 @@
+schema_version: "veriforge-task/v1"
+
+# 一致性锚点 1：task_id 必须与 rubric.yaml、isolation-manifest.yaml 完全一致。
+task_id: "example-task-v1"
+title: "示例任务标题"
+
+# 固定的任务包标签。不由分数推断，不在 rollout 中变化，参赛者不可修改。
+# 生成的任务包中不允许出现 release 或 lifecycle 字段。
+status: verified
+execution_mode: local_only
+
+objective: "用一句话说明 Agent 必须达成什么"
+
+# 交给 Agent 的完整说明。adapter 会原样把本文件送进 prompt，
+# 因此这里必须写清输出格式，不能指望模型从文件名推断。
+agent_instructions: |
+  读取 fixtures/ 下的全部记录，对每条记录给出判定，
+  把结果写入 outputs/result.json。
+  只使用 fixtures/ 中的数据，不要编造记录。
+
+initial_state:
+  # 与 isolation-manifest.yaml 的同名字段保持一致。
+  read_only_paths:
+    - "02-evaluation/fixtures"
+    - "01-task/task.yaml"
+  mutable_paths:
+    - "outputs"
+
+# 一致性锚点 2：path 必须与 scorer.py 读取的文件名、rubric 的描述一致。
+required_output:
+  path: "outputs/result.json"
+  format: json
+  schema:
+    # 一致性锚点 3：字段名必须与 validators/check_schema.py 一字不差。
+    required_fields:
+      - "summary"
+      - "reviews"
+    items:
+      reviews:
+        required_fields:
+          - "record_id"
+          - "rationale_code"
+
+# 一致性锚点 4：所有被 scorer 精确比对的字符串都必须在此公开编码表。
+# 不允许只存在于 reference_answer/ 中，否则等于让 Agent 猜评测约定。
+codebooks:
+  rationale_code:
+    - "approve"
+    - "reject"
+    - "needs_info"
+
+constraints:
+  side_effects: forbidden
+  network: deny_by_default
+  forbidden_actions:
+    - "发送邮件或消息"
+    - "删除或发布任何内容"
+    - "修改 fixtures/ 或本任务定义文件"
+
+acceptance:
+  # 与 rubric.yaml 的 pass_policy.min_score 保持一致。
+  minimum_score: 75
+  fatal_rules:
+    - "输出中不得包含凭据字面量"
+    - "证据引用必须指向 fixtures/ 下的真实记录"
+
+known_limitations: []

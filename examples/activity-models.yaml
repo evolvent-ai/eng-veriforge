@@ -47,7 +47,7 @@ models:
         parameters:
           reasoning_effort: "max"
           max_output_tokens: 32768
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
   - id: "gpt-5.6-sol"
@@ -69,25 +69,26 @@ models:
     profiles:
       - id: "default"
         parameters:
-          reasoning_effort: "max"
+          # gpt-5.6-sol 的最高推理档是 xhigh，没有 max 档。
+          reasoning_effort: "xhigh"
           max_output_tokens: 32768
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
+  # Qwen 走主办方 MaaS 实例的 Anthropic 兼容端点，只支持 CC。
+  # 路径是 /apps/anthropic，且不能以 /v1 结尾，否则 CC 会拼出 /v1/v1/models。
   - id: "qwen3.8-max"
     display_name: "Qwen3.8 Max"
     provider: "aliyun_maas"
-    adapter: "openai_chat"
+    adapter: "anthropic_messages"
     model_name: "qwen3.8-max"
-    endpoint: "chat_completions"
-    base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    endpoint: "messages"
+    base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/apps/anthropic"
     credential_env: "DASHSCOPE_API_KEY"
-    supported_harnesses: ["codex"]
-    codex_model_provider: "aliyun_maas"
-    codex_base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    supported_harnesses: ["cc"]
     trace:
-      mode: "chat_tool_loop"
-      streaming: false
+      mode: "native_cli_stream"
+      streaming: true
       tool_calls: true
       normalized_events: true
     profiles:
@@ -95,23 +96,25 @@ models:
         parameters:
           reasoning_effort: "max"
           max_output_tokens: 32768
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
+  # Kimi 是矩阵中的例外：只支持 CC，不支持 Codex。
+  # Codex 仅接受 Responses 协议，而 Moonshot 的 OpenAI 端点是 Chat Completions，
+  # 直连必然 404；官方 Anthropic 兼容端点可以让 CC 直接使用，无需本地转换层。
+  # 该端点上的模型 ID 是 kimi-k3[1m]，与 OpenAI 端点的 kimi-k3 不同。
   - id: "kimi-k3"
     display_name: "K3"
     provider: "moonshot"
-    adapter: "openai_chat"
-    model_name: "kimi-k3"
-    endpoint: "chat_completions"
-    base_url: "https://api.moonshot.cn/v1"
+    adapter: "anthropic_messages"
+    model_name: "kimi-k3[1m]"
+    endpoint: "messages"
+    base_url: "https://api.moonshot.cn/anthropic"
     credential_env: "MOONSHOT_API_KEY"
-    supported_harnesses: ["codex"]
-    codex_model_provider: "moonshot"
-    codex_base_url: "https://api.moonshot.cn/v1"
+    supported_harnesses: ["cc"]
     trace:
-      mode: "chat_tool_loop"
-      streaming: false
+      mode: "native_cli_stream"
+      streaming: true
       tool_calls: true
       normalized_events: true
     profiles:
@@ -119,23 +122,23 @@ models:
         parameters:
           reasoning_effort: "max"
           max_output_tokens: 32768
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
+  # DeepSeek 走官方 Anthropic 兼容端点，只支持 CC。
+  # 该端点上的模型 ID 是 deepseek-v4-pro[1m]。
   - id: "deepseek-v4-pro"
     display_name: "DeepSeek V4 Pro"
     provider: "deepseek"
-    adapter: "openai_chat"
-    model_name: "deepseek-v4-pro"
-    endpoint: "chat_completions"
-    base_url: "https://api.deepseek.com"
+    adapter: "anthropic_messages"
+    model_name: "deepseek-v4-pro[1m]"
+    endpoint: "messages"
+    base_url: "https://api.deepseek.com/anthropic"
     credential_env: "DEEPSEEK_API_KEY"
-    supported_harnesses: ["codex"]
-    codex_model_provider: "deepseek"
-    codex_base_url: "https://api.deepseek.com"
+    supported_harnesses: ["cc"]
     trace:
-      mode: "chat_tool_loop"
-      streaming: false
+      mode: "native_cli_stream"
+      streaming: true
       tool_calls: true
       normalized_events: true
     profiles:
@@ -143,7 +146,7 @@ models:
         parameters:
           reasoning_effort: "max"
           max_output_tokens: 32768
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
 roll_policy:

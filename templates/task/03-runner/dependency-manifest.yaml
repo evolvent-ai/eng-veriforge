@@ -1,0 +1,56 @@
+schema_version: "veriforge-dependency-manifest/v1"
+task_id: "example-task-v1"
+
+# 每项的 status 只能是 ready / missing / unverified，由生成期的只读检查填写。
+# 环境变量只按名称检查是否存在，绝不读取其值。
+
+runtime:
+  - name: "python3"
+    kind: cli
+    check: "python3 --version"
+    status: ready
+    required: true
+
+  - name: "PyYAML"
+    kind: python_package
+    check: "python3 -c 'import yaml'"
+    version: ">=6.0,<7"
+    status: ready
+    required: true
+
+harnesses:
+  - name: "claude"
+    kind: cli
+    check: "claude --version"
+    executable_env: "CLAUDE_BIN"
+    status: unverified
+    required: false
+
+  - name: "codex"
+    kind: cli
+    check: "codex --version"
+    executable_env: "CODEX_BIN"
+    status: unverified
+    required: false
+
+# 只记录变量名，不记录值。运行时缺失会用隐藏输入提示。
+credentials:
+  - name: "WODEX_API_KEY"
+    status: unverified
+    runtime_only: true
+  - name: "DASHSCOPE_API_KEY"
+    status: unverified
+    runtime_only: true
+  - name: "MOONSHOT_API_KEY"
+    status: unverified
+    runtime_only: true
+  - name: "DEEPSEEK_API_KEY"
+    status: unverified
+    runtime_only: true
+
+# 默认不声明任何 MCP、额外 Skill、浏览器或网络域名。
+mcps: []
+skills: []
+network:
+  mode: deny_by_default
+  allowed_domains: []

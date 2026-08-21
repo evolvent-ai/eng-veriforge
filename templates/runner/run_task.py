@@ -27,14 +27,47 @@ from datetime import datetime, timezone
 try:
     import yaml
 except ImportError as exc:  # pragma: no cover - exercised by preflight users
-    raise SystemExit("PyYAML is required to read models.yaml") from exc
+    raise SystemExit("读取 models.yaml 需要 PyYAML") from exc
 
 
 RUNNER_VERSION = "veriforge-runner/v2.6"
 TRACE_VERSION = "veriforge-trace/v1"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
-FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
+# CC 的项目级权限规则：拒绝一切绝对路径的读写编辑。
+# `//` 前缀表示文件系统根开始的绝对路径；匹配顺序是 deny -> ask -> allow，
+# 且项目级 deny 无法被 allow 覆盖，因此 Agent 无法自行放宽。
+# CC 的工具白名单里没有 Bash，五个文件工具全部受此约束。
+CC_WORKSPACE_SETTINGS = {
+    "permissions": {
+        "deny": ["Read(//**)", "Write(//**)", "Edit(//**)"],
+    }
+}
+# scorer 的独立超时。确定性校验通常几秒内完成，不随 Agent 超时放大。
+SCORER_TIMEOUT_SECONDS = 300
+# 上下文窗口统一为 1M。必须显式声明：CC 对无法识别的模型默认只按 200K 计算，
+# 不设的话不带 [1m] 后缀的模型会被砍到实际能力的 1/5，跨模型分数不可比。
+FIXED_CONTEXT_WINDOW = 1_000_000
+# 自动压缩阈值取窗口的 90%，留出足够余量完成摘要。
+FIXED_AUTO_COMPACT_LIMIT = 900_000
+# 推理档按模型固定。绝大多数模型用 max；gpt-5.6-sol 的最高档是 xhigh，
+# 因此单独声明，避免向 provider 下发它不接受的档位。
+FIXED_MAX_OUTPUT_TOKENS = 32768
+FIXED_REASONING_EFFORT = {
+    "kimi-k3": "max",
+    "deepseek-v4-pro": "max",
+    "qwen3.8-max": "max",
+    "claude-opus-5": "max",
+    "gpt-5.6-sol": "xhigh",
+}
+
+
+def fixed_parameters(model_id: str) -> dict:
+    """返回该模型唯一合法的 profile 参数。"""
+    return {
+        "reasoning_effort": FIXED_REASONING_EFFORT[model_id],
+        "max_output_tokens": FIXED_MAX_OUTPUT_TOKENS,
+    }
 ISOLATION_MANIFEST_VERSION = "veriforge-isolation-manifest/v1"
 EVALUATION_DIR = "02-evaluation"
 CONTROL_PATHS = {
@@ -52,53 +85,55 @@ CONTROL_PATHS = {
     "provider_agent": "03-runner/provider_agent.py",
 }
 CANONICAL_MODELS = {
+    # Kimi 走 Moonshot 官方 Anthropic 兼容端点，因此只支持 CC。
+    # Codex 只认 Responses 协议，而 Moonshot 的 OpenAI 端点是 Chat Completions，
+    # 直连会 404；改走 Anthropic 端点后无需任何本地转换层。
+    # 注意：Anthropic 端点上的模型 ID 是 kimi-k3[1m]，不是 OpenAI 端点的 kimi-k3。
     "kimi-k3": {
         "provider": "moonshot",
-        "adapter": "openai_chat",
-        "model_name": "kimi-k3",
-        "endpoint": "chat_completions",
-        "base_url": "https://api.moonshot.cn/v1",
+        "adapter": "anthropic_messages",
+        "model_name": "kimi-k3[1m]",
+        "endpoint": "messages",
+        "base_url": "https://api.moonshot.cn/anthropic",
         "credential_env": "MOONSHOT_API_KEY",
-        "supported_harnesses": ["codex"],
-        "codex_model_provider": "moonshot",
-        "codex_base_url": "https://api.moonshot.cn/v1",
+        "supported_harnesses": ["cc"],
         "trace": {
-            "mode": "chat_tool_loop",
-            "streaming": False,
+            "mode": "native_cli_stream",
+            "streaming": True,
             "tool_calls": True,
             "normalized_events": True,
         },
     },
+    # DeepSeek 走官方 Anthropic 兼容端点，只支持 CC。
+    # 该端点上的模型 ID 是 deepseek-v4-pro[1m]。
     "deepseek-v4-pro": {
         "provider": "deepseek",
-        "adapter": "openai_chat",
-        "model_name": "deepseek-v4-pro",
-        "endpoint": "chat_completions",
-        "base_url": "https://api.deepseek.com",
+        "adapter": "anthropic_messages",
+        "model_name": "deepseek-v4-pro[1m]",
+        "endpoint": "messages",
+        "base_url": "https://api.deepseek.com/anthropic",
         "credential_env": "DEEPSEEK_API_KEY",
-        "supported_harnesses": ["codex"],
-        "codex_model_provider": "deepseek",
-        "codex_base_url": "https://api.deepseek.com",
+        "supported_harnesses": ["cc"],
         "trace": {
-            "mode": "chat_tool_loop",
-            "streaming": False,
+            "mode": "native_cli_stream",
+            "streaming": True,
             "tool_calls": True,
             "normalized_events": True,
         },
     },
+    # Qwen 走主办方 MaaS 实例的 Anthropic 兼容端点，只支持 CC。
+    # 注意路径是 /apps/anthropic，且不能以 /v1 结尾，否则 CC 会拼出 /v1/v1/models。
     "qwen3.8-max": {
         "provider": "aliyun_maas",
-        "adapter": "openai_chat",
+        "adapter": "anthropic_messages",
         "model_name": "qwen3.8-max",
-        "endpoint": "chat_completions",
-        "base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "endpoint": "messages",
+        "base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/apps/anthropic",
         "credential_env": "DASHSCOPE_API_KEY",
-        "supported_harnesses": ["codex"],
-        "codex_model_provider": "aliyun_maas",
-        "codex_base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "supported_harnesses": ["cc"],
         "trace": {
-            "mode": "chat_tool_loop",
-            "streaming": False,
+            "mode": "native_cli_stream",
+            "streaming": True,
             "tool_calls": True,
             "normalized_events": True,
         },
@@ -203,93 +238,93 @@ def load_catalog(path: Path) -> dict:
     try:
         catalog = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValueError(f"models file not found: {path}") from exc
+        raise ValueError(f"未找到模型矩阵文件：{path}") from exc
     except yaml.YAMLError as exc:
-        raise ValueError(f"invalid YAML in {path}: {exc}") from exc
+        raise ValueError(f"{path} 不是合法的 YAML：{exc}") from exc
 
     if not isinstance(catalog, dict):
-        raise ValueError("models.yaml must contain a mapping")
+        raise ValueError("models.yaml 的顶层必须是一个映射")
     if catalog.get("schema_version") != "veriforge-model-matrix/v2":
-        raise ValueError("models.yaml must use veriforge-model-matrix/v2")
+        raise ValueError("models.yaml 必须使用 veriforge-model-matrix/v2")
 
     models = catalog.get("models")
     if not isinstance(models, list):
-        raise ValueError("models.yaml must declare a models list")
+        raise ValueError("models.yaml 必须声明 models 列表")
     if len(models) != len(CANONICAL_MODELS):
-        raise ValueError("models.yaml must contain exactly the five canonical models")
+        raise ValueError("models.yaml 必须恰好包含五个 canonical 模型")
 
     selection = catalog.get("selection")
     if not isinstance(selection, dict):
-        raise ValueError("models.yaml needs a selection mapping")
+        raise ValueError("models.yaml 缺少 selection 映射")
     if selection.get("mode") != "participant_selects_one":
-        raise ValueError("selection.mode must be participant_selects_one")
+        raise ValueError("selection.mode 必须是 participant_selects_one")
     if selection.get("allow_participant_model_choice") is not True:
-        raise ValueError("participant model choice must be enabled")
+        raise ValueError("必须允许参赛者选择模型")
     if selection.get("allow_participant_profile_choice") is not False:
-        raise ValueError("participant profile choice must be disabled")
+        raise ValueError("必须禁止参赛者选择 profile")
     if selection.get("allow_custom_parameters") is not False:
-        raise ValueError("custom parameters must be disabled")
+        raise ValueError("必须禁止自定义参数")
     if selection.get("max_models_per_run", 1) != 1:
-        raise ValueError("a participant run may select exactly one model")
+        raise ValueError("一次参赛者运行只能选择一个模型")
     fixed_profile = selection.get("fixed_profile", "default")
     if fixed_profile != "default":
-        raise ValueError("selection.fixed_profile must be default")
+        raise ValueError("selection.fixed_profile 必须是 default")
 
     organizer_controls = catalog.get("organizer_controls")
     if not isinstance(organizer_controls, dict):
-        raise ValueError("organizer_controls is required for the canonical matrix")
+        raise ValueError("canonical 矩阵必须声明 organizer_controls")
     if organizer_controls.get("model_matrix_locked") is not True:
-        raise ValueError("organizer_controls.model_matrix_locked must be true")
+        raise ValueError("organizer_controls.model_matrix_locked 必须为 true")
     if organizer_controls.get("participant_model_choice_only") is not True:
-        raise ValueError("organizer_controls.participant_model_choice_only must be true")
+        raise ValueError("organizer_controls.participant_model_choice_only 必须为 true")
     if organizer_controls.get("fixed_profile_only") is not True:
-        raise ValueError("organizer_controls.fixed_profile_only must be true")
+        raise ValueError("organizer_controls.fixed_profile_only 必须为 true")
     if organizer_controls.get("fixed_model_count") != len(CANONICAL_MODELS):
-        raise ValueError("organizer_controls.fixed_model_count must be 5")
+        raise ValueError("organizer_controls.fixed_model_count 必须为 5")
     if organizer_controls.get("credential_mode") != "per_selected_model":
-        raise ValueError("organizer_controls.credential_mode must be per_selected_model")
+        raise ValueError("organizer_controls.credential_mode 必须是 per_selected_model")
     approved_ids = organizer_controls.get("approved_model_ids")
     if not isinstance(approved_ids, list) or set(approved_ids) != CANONICAL_MODEL_IDS or len(approved_ids) != len(CANONICAL_MODELS):
-        raise ValueError("organizer_controls.approved_model_ids must be the five canonical IDs")
+        raise ValueError("organizer_controls.approved_model_ids 必须是五个 canonical 模型 ID")
 
     seen_models: set[str] = set()
     for model in models:
         if not isinstance(model, dict):
-            raise ValueError("each model must be a mapping")
+            raise ValueError("每个模型条目必须是一个映射")
         model_id = model.get("id")
         if model_id not in CANONICAL_MODEL_IDS:
-            raise ValueError(f"model ID is not in the canonical matrix: {model_id}")
+            raise ValueError(f"模型 ID 不在 canonical 矩阵中：{model_id}")
         if model_id in seen_models:
-            raise ValueError(f"duplicate model id: {model_id}")
+            raise ValueError(f"模型 ID 重复：{model_id}")
         seen_models.add(model_id)
         canonical = CANONICAL_MODELS[model_id]
         for field, expected in canonical.items():
             value = model.get(field)
             if value != expected:
-                raise ValueError(f"model {model_id}.{field} must equal the canonical matrix value")
+                raise ValueError(f"模型 {model_id}.{field} 必须与 canonical 矩阵的取值一致")
             if isinstance(value, str) and PLACEHOLDER_MARKER in value:
-                raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
+                raise ValueError(f"模型 {model_id} 的 {field} 仍是主办方占位符")
         trace = model.get("trace")
         if not isinstance(trace, dict):
-            raise ValueError(f"model {model_id} must declare a trace mapping")
+            raise ValueError(f"模型 {model_id} 必须声明 trace 映射")
         if set(trace) != {"mode", "streaming", "tool_calls", "normalized_events"}:
-            raise ValueError(f"model {model_id}.trace has unexpected fields")
+            raise ValueError(f"模型 {model_id}.trace 含有非预期字段")
         expected_trace = canonical["trace"]
         if trace != expected_trace:
-            raise ValueError(f"model {model_id}.trace must match the canonical trace capability")
+            raise ValueError(f"模型 {model_id}.trace 必须与 canonical 的 trace 能力一致")
         supported_harnesses = model.get("supported_harnesses")
         if not isinstance(supported_harnesses, list) or not supported_harnesses:
-            raise ValueError(f"model {model_id} must declare supported_harnesses")
+            raise ValueError(f"模型 {model_id} 必须声明 supported_harnesses")
         if not set(supported_harnesses).issubset(CANONICAL_HARNESS_IDS):
-            raise ValueError(f"model {model_id} declares an unapproved harness")
+            raise ValueError(f"模型 {model_id} 声明了未经批准的 harness")
         profiles = model.get("profiles")
         if not isinstance(profiles, list) or len(profiles) != 1:
-            raise ValueError(f"model {model_id} must declare exactly one profile")
+            raise ValueError(f"模型 {model_id} 必须恰好声明一个 profile")
         profile = profiles[0]
         if not isinstance(profile, dict) or profile.get("id") != "default":
-            raise ValueError(f"model {model_id} must declare the sole default profile")
-        if profile.get("parameters") != FIXED_PARAMETERS:
-            raise ValueError(f"model {model_id} default profile must use the fixed parameters")
+            raise ValueError(f"模型 {model_id} 必须声明唯一的 default profile")
+        if profile.get("parameters") != fixed_parameters(model_id):
+            raise ValueError(f"模型 {model_id} 的 default profile 必须使用固定参数")
         timeout_seconds = profile.get("timeout_seconds")
         if (
             not isinstance(timeout_seconds, (int, float))
@@ -297,12 +332,12 @@ def load_catalog(path: Path) -> dict:
             or not math.isfinite(float(timeout_seconds))
             or timeout_seconds <= 0
         ):
-            raise ValueError(f"model {model_id} default profile must declare a finite positive timeout_seconds")
+            raise ValueError(f"模型 {model_id} 的 default profile 必须声明有限的正数 timeout_seconds")
         retries = profile.get("retries")
         if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
-            raise ValueError(f"model {model_id} default profile retries must be a non-negative integer")
+            raise ValueError(f"模型 {model_id} 的 default profile 中 retries 必须是非负整数")
     if seen_models != CANONICAL_MODEL_IDS:
-        raise ValueError("models.yaml must contain exactly the five canonical model IDs")
+        raise ValueError("models.yaml 必须恰好包含五个 canonical 模型 ID")
 
     return catalog
 
@@ -312,30 +347,30 @@ def load_harness_catalog(path: Path) -> dict:
     try:
         catalog = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValueError(f"harnesses file not found: {path}") from exc
+        raise ValueError(f"未找到 harness 矩阵文件：{path}") from exc
     except yaml.YAMLError as exc:
-        raise ValueError(f"invalid YAML in {path}: {exc}") from exc
+        raise ValueError(f"{path} 不是合法的 YAML：{exc}") from exc
     if not isinstance(catalog, dict) or catalog.get("schema_version") != "veriforge-harness-matrix/v1":
-        raise ValueError("harnesses.yaml must use veriforge-harness-matrix/v1")
+        raise ValueError("harnesses.yaml 必须使用 veriforge-harness-matrix/v1")
     if catalog.get("credential_mode") != "per_selected_model":
-        raise ValueError("harnesses.yaml must use per_selected_model credentials")
+        raise ValueError("harnesses.yaml 必须使用 per_selected_model 凭据模式")
     entries = catalog.get("harnesses")
     if not isinstance(entries, list) or len(entries) != len(CANONICAL_HARNESSES):
-        raise ValueError("harnesses.yaml must contain exactly cc and codex")
+        raise ValueError("harnesses.yaml 必须恰好包含 cc 和 codex")
     seen: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("id") not in CANONICAL_HARNESS_IDS:
-            raise ValueError("harnesses.yaml contains an unapproved harness")
+            raise ValueError("harnesses.yaml 含有未经批准的 harness")
         harness_id = entry["id"]
         if harness_id in seen:
-            raise ValueError(f"duplicate harness id: {harness_id}")
+            raise ValueError(f"harness ID 重复：{harness_id}")
         seen.add(harness_id)
         canonical = CANONICAL_HARNESSES[harness_id]
         for field, expected in canonical.items():
             if entry.get(field) != expected:
-                raise ValueError(f"harness {harness_id}.{field} does not match the approved harness mapping")
+                raise ValueError(f"harness {harness_id}.{field} 与已批准的 harness 映射不一致")
     if seen != CANONICAL_HARNESS_IDS:
-        raise ValueError("harnesses.yaml must contain exactly cc and codex")
+        raise ValueError("harnesses.yaml 必须恰好包含 cc 和 codex")
     return catalog
 
 
@@ -382,7 +417,7 @@ def _relative_path(path: Path, root: Path) -> Path:
     try:
         return path.resolve().relative_to(root.resolve())
     except ValueError as exc:
-        raise ValueError(f"path is outside workspace: {path}") from exc
+        raise ValueError(f"路径超出 workspace 范围：{path}") from exc
 
 
 def _path_matches(relative: Path, roots: list[Path]) -> bool:
@@ -416,6 +451,24 @@ def protected_workspace_hash(workspace: Path, mutable_paths: list[str]) -> str:
     return digest.hexdigest()
 
 
+def find_output_symlinks(output_dir: Path) -> list[str]:
+    """列出输出目录中的符号链接。
+
+    outputs/ 属于 mutable_paths，被 protected_workspace_hash 跳过，因此里面的
+    符号链接不受完整性哈希约束。Agent 可以把 result.json 软链到 workspace 外的
+    文件，让 scorer 读到不受任何约束的内容——实测这样能拿到分数。Agent 的产出
+    必须是 workspace 内的真实文件，因此一律拒绝符号链接，不区分指向内外。
+    """
+    if not output_dir.is_dir():
+        return []
+    root = output_dir.resolve()
+    found = []
+    for path in sorted(output_dir.rglob("*")):
+        if path.is_symlink():
+            found.append(path.relative_to(root).as_posix())
+    return found
+
+
 def make_read_only(path: Path) -> None:
     """Remove write bits from a staged protected path."""
     if not path.exists() and not path.is_symlink():
@@ -435,10 +488,10 @@ def path_hashes(root: Path, entries: dict[str, str], *, required: bool) -> dict[
         path = root / relative
         if not path.exists() and not path.is_symlink():
             if required:
-                raise ValueError(f"required integrity path is missing: {relative}")
+                raise ValueError(f"缺少必需的完整性校验路径：{relative}")
             continue
         if path.is_symlink():
-            raise ValueError(f"integrity path must not be a symlink: {relative}")
+            raise ValueError(f"完整性校验路径不能是符号链接：{relative}")
         hashes[label] = tree_hash(path)
     return hashes
 
@@ -476,18 +529,18 @@ def load_isolation_manifest(workspace: Path, task_id: str) -> dict:
     try:
         manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
-        raise ValueError(f"invalid YAML in isolation manifest: {exc}") from exc
+        raise ValueError(f"隔离清单不是合法的 YAML：{exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema_version") != ISOLATION_MANIFEST_VERSION:
-        raise ValueError(f"isolation manifest must use {ISOLATION_MANIFEST_VERSION}")
+        raise ValueError(f"隔离清单必须使用 {ISOLATION_MANIFEST_VERSION}")
     if manifest.get("task_id") != task_id:
-        raise ValueError("isolation manifest task_id does not match the task")
+        raise ValueError("隔离清单的 task_id 与任务不一致")
     for key in ("fixture_paths", "read_only_paths", "mutable_paths"):
         values = manifest.get(key, ["02-evaluation/fixtures"] if key == "fixture_paths" else [])
         if not isinstance(values, list) or not all(isinstance(path, str) for path in values):
-            raise ValueError(f"isolation manifest {key} must be a list of relative paths")
+            raise ValueError(f"隔离清单的 {key} 必须是一组相对路径")
         for relative in values:
             if Path(relative).is_absolute() or ".." in Path(relative).parts:
-                raise ValueError(f"isolation manifest path escapes workspace: {relative}")
+                raise ValueError(f"隔离清单中的路径逃逸出 workspace：{relative}")
         manifest[key] = values
     manifest["manifest_path"] = str(path)
     return manifest
@@ -509,45 +562,45 @@ def validate_manifest_paths(
         for left in read_only
         for right in mutable
     ):
-        raise ValueError("isolation manifest paths cannot be both read-only and mutable")
+        raise ValueError("隔离清单中的路径不能同时是只读和可写")
 
     for relative in [*read_only, *mutable]:
         if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"isolation manifest path escapes workspace: {relative}")
+            raise ValueError(f"隔离清单中的路径逃逸出 workspace：{relative}")
         if relative == Path("."):
-            raise ValueError("isolation manifest paths must not be the workspace root")
+            raise ValueError("隔离清单中的路径不能是 workspace 根目录")
         candidate = root / relative
         try:
             candidate.resolve(strict=False).relative_to(root)
         except ValueError as exc:
-            raise ValueError(f"isolation manifest path escapes workspace: {relative}") from exc
+            raise ValueError(f"隔离清单中的路径逃逸出 workspace：{relative}") from exc
 
     for relative in read_only:
         candidate = root / relative
         if not candidate.exists() and not candidate.is_symlink():
             if strict:
-                raise ValueError(f"declared read-only path is missing: {relative}")
+                raise ValueError(f"已声明的只读路径不存在：{relative}")
             continue
         make_read_only(candidate)
 
     for relative in mutable:
         candidate = root / relative
         if candidate.exists() and candidate.is_symlink():
-            raise ValueError(f"mutable path must not be a symlink: {relative}")
+            raise ValueError(f"可写路径不能是符号链接：{relative}")
         if not candidate.exists():
             candidate.mkdir(parents=True, exist_ok=True)
 
     staged_spec = _relative_path(task_spec, root)
     if strict and not _path_matches(staged_spec, read_only):
-        raise ValueError("task spec must be declared in isolation-manifest.read_only_paths")
+        raise ValueError("任务定义文件必须声明在 isolation-manifest.read_only_paths 中")
 
     output_dir = root / "outputs"
     if strict and not _path_matches(_relative_path(output_dir, root), mutable):
-        raise ValueError("outputs must be covered by isolation-manifest.mutable_paths")
+        raise ValueError("outputs 必须被 isolation-manifest.mutable_paths 覆盖")
     if strict:
         for fixture in manifest.get("fixture_paths", []):
             if not _path_matches(Path(fixture), read_only):
-                raise ValueError(f"fixture path must be read-only: {fixture}")
+                raise ValueError(f"fixture 路径必须是只读的：{fixture}")
 
 
 def fixture_hashes(workspace: Path, manifest: dict, *, strict: bool = False) -> dict[str, str]:
@@ -556,7 +609,7 @@ def fixture_hashes(workspace: Path, manifest: dict, *, strict: bool = False) -> 
         path = workspace / relative
         if not path.exists() and not path.is_symlink():
             if strict:
-                raise ValueError(f"declared fixture path is missing: {relative}")
+                raise ValueError(f"已声明的 fixture 路径不存在：{relative}")
             hashes[relative] = "<missing>"
             continue
         hashes[relative] = tree_hash(path)
@@ -591,8 +644,8 @@ def resolve_agent_command(
                 return [sys.executable, str(candidate)]
             return [str(candidate)]
     raise ValueError(
-        f"selected harness adapter not found for {harness_id or 'legacy'}; "
-        "expected 03-runner/cc_agent.sh or 03-runner/codex_agent.sh"
+        f"未找到所选 harness（{harness_id or 'legacy'}）的 adapter；"
+        "应为 03-runner/cc_agent.sh 或 03-runner/codex_agent.sh"
     )
 
 
@@ -602,7 +655,7 @@ def resolve_scorer_command(evaluation_dir: Path, output_dir: Path, explicit: lis
         return explicit
     scorer = evaluation_dir / "scorer.py"
     if not scorer.is_file():
-        raise ValueError("trusted scorer not found in the evaluation directory")
+        raise ValueError("在 evaluation 目录中未找到可信 scorer")
     return [sys.executable, str(scorer), "--outputs", str(output_dir)]
 
 
@@ -617,7 +670,7 @@ def validate_generated_package(
     """Fail preflight before a participant enters a key if generated tools are missing."""
     if participant_mode:
         if explicit_agent or explicit_scorer:
-            raise ValueError("agent/scorer command overrides require --developer-mode")
+            raise ValueError("覆盖 agent/scorer 命令需要 --developer-mode")
         required = (
             source / "02-evaluation" / "scorer.py",
             source / "02-evaluation" / "rubric.yaml",
@@ -630,17 +683,17 @@ def validate_generated_package(
         )
         missing = [str(path.relative_to(source)) for path in required if not path.exists()]
         if missing:
-            raise ValueError(f"participant package is missing required integrity assets: {', '.join(missing)}")
+            raise ValueError(f"参赛者任务包缺少必需的完整性资产：{', '.join(missing)}")
         harnesses = ("cc", "codex") if harness_id is None else (harness_id,)
         for selected in harnesses:
             adapter = source / "03-runner" / f"{selected}_agent.sh"
             if not adapter.is_file() or not os.access(adapter, os.X_OK):
-                raise ValueError(f"participant package is missing executable adapter: {adapter.name}")
+                raise ValueError(f"参赛者任务包缺少可执行的 adapter：{adapter.name}")
         return
 
     resolve_agent_command(source, explicit_agent, harness_id)
     if explicit_scorer is None and not (source / "02-evaluation" / "scorer.py").is_file():
-        raise ValueError("generated scorer not found: 02-evaluation/scorer.py")
+        raise ValueError("未找到生成的 scorer：02-evaluation/scorer.py")
 
 
 def validate_task_spec(path: Path) -> dict:
@@ -648,15 +701,15 @@ def validate_task_spec(path: Path) -> dict:
     try:
         task = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValueError(f"task spec not found: {path}") from exc
+        raise ValueError(f"未找到任务定义文件：{path}") from exc
     except yaml.YAMLError as exc:
-        raise ValueError(f"invalid YAML in task spec: {exc}") from exc
+        raise ValueError(f"任务定义文件不是合法的 YAML：{exc}") from exc
     if not isinstance(task, dict):
-        raise ValueError("task spec must contain a mapping")
+        raise ValueError("任务定义文件的顶层必须是一个映射")
     if task.get("status") != "verified":
-        raise ValueError("task spec must set status: verified")
+        raise ValueError("任务定义文件必须设置 status: verified")
     if "release" in task or "lifecycle" in task:
-        raise ValueError("task spec must not contain release or lifecycle metadata")
+        raise ValueError("任务定义文件不能包含 release 或 lifecycle 元数据")
     return task
 
 
@@ -674,12 +727,33 @@ def choose_index(items: list[tuple[str, str]], label: str) -> str:
         return selected[0]
 
 
+def choose_rolls(minimum: int, maximum: int, default: int) -> int:
+    """交互式选择 rollout 次数。直接回车用默认值。"""
+    print(f"请选择 rollout 次数（{minimum}-{maximum}，直接回车使用 {default}）:")
+    while True:
+        try:
+            answer = input("次数: ").strip()
+        except EOFError:
+            return default
+        if not answer:
+            return default
+        try:
+            selected = int(answer)
+        except ValueError:
+            print(f"请输入 {minimum}-{maximum} 之间的整数。", file=sys.stderr)
+            continue
+        if selected < minimum or selected > maximum:
+            print(f"请输入 {minimum}-{maximum} 之间的整数。", file=sys.stderr)
+            continue
+        return selected
+
+
 def resolve_harnesses(catalog: dict, args: argparse.Namespace) -> list[dict]:
     entries = catalog["harnesses"]
     by_id = {entry["id"]: entry for entry in entries}
     if args.harness:
         if args.harness not in by_id:
-            raise ValueError(f"harness is not allowlisted: {args.harness}")
+            raise ValueError(f"harness 不在 allowlist 中：{args.harness}")
         return [by_id[args.harness]]
     if args.preflight and not args.interactive:
         return entries
@@ -720,20 +794,20 @@ def resolve_models(catalog: dict, args: argparse.Namespace) -> list[dict]:
         ]
         by_id = {model["id"]: model for model in models}
         if not models:
-            raise ValueError(f"selected harness has no compatible approved models: {selected_harness}")
+            raise ValueError(f"所选 harness 没有兼容的已批准模型：{selected_harness}")
     if args.preflight and not args.model and not args.interactive:
         return models
     if args.model:
         if args.model not in by_id:
             if args.model in all_by_id and selected_harness:
-                raise ValueError(f"model {args.model} is not compatible with harness {selected_harness}")
-            raise ValueError(f"model is not allowlisted: {args.model}")
+                raise ValueError(f"模型 {args.model} 与 harness {selected_harness} 不兼容")
+            raise ValueError(f"模型不在 allowlist 中：{args.model}")
         return [by_id[args.model]]
 
     if args.interactive or sys.stdin.isatty():
         choices = [(model["id"], model.get("display_name", model["id"])) for model in models]
         return [by_id[choose_index(choices, "请选择模型:")]]
-    raise ValueError("provide --model or run in an interactive terminal")
+    raise ValueError("请使用 --model 指定模型，或在交互式终端中运行")
 
 
 def resolve_profile(catalog: dict, model: dict) -> dict:
@@ -741,7 +815,7 @@ def resolve_profile(catalog: dict, model: dict) -> dict:
     by_id = {profile["id"]: profile for profile in profiles}
     fixed_profile = catalog["selection"].get("fixed_profile", "default")
     if fixed_profile not in by_id:
-        raise ValueError(f"fixed profile is not declared for {model['id']}: {fixed_profile}")
+        raise ValueError(f"模型 {model['id']} 未声明固定 profile：{fixed_profile}")
     return by_id[fixed_profile]
 
 
@@ -759,10 +833,10 @@ def build_provider_parameters(model: dict, profile: dict) -> dict:
     adapter_name = model.get("adapter")
     adapter = PROVIDER_ADAPTERS.get(adapter_name)
     if adapter is None:
-        raise ValueError(f"no provider adapter is registered for {adapter_name!r}")
+        raise ValueError(f"未注册名为 {adapter_name!r} 的 provider adapter")
     parameters = profile.get("parameters", {})
-    if parameters != FIXED_PARAMETERS:
-        raise ValueError("provider adapters only accept the fixed canonical parameters")
+    if parameters != fixed_parameters(model["id"]):
+        raise ValueError("provider adapter 只接受固定的 canonical 参数")
     return adapter(parameters)
 
 
@@ -819,6 +893,8 @@ def build_environment(
             "VERIFORGE_PARAMETERS_JSON": json.dumps(profile.get("parameters", {}), sort_keys=True),
             "VERIFORGE_NATIVE_PARAMETERS_JSON": json.dumps(native_parameters, sort_keys=True),
             "VERIFORGE_PROVIDER_REQUEST_JSON": json.dumps(provider_request, sort_keys=True),
+            "VERIFORGE_CONTEXT_WINDOW": str(FIXED_CONTEXT_WINDOW),
+            "VERIFORGE_AUTO_COMPACT_LIMIT": str(FIXED_AUTO_COMPACT_LIMIT),
             "VERIFORGE_HARNESS_ID": str((harness or {}).get("id", "")),
             "VERIFORGE_HARNESS_PROTOCOL": str((harness or {}).get("protocol", "")),
             "VERIFORGE_API_BASE_URL": str(model.get("base_url", "")),
@@ -964,7 +1040,7 @@ def stage_workspace(
     source = source.resolve()
     workspace = workspace.resolve()
     if not source.is_dir():
-        raise ValueError(f"workspace source is not a directory: {source}")
+        raise ValueError(f"workspace 源不是目录：{source}")
     try:
         relative_spec = task_spec.resolve().relative_to(source)
     except ValueError:
@@ -985,10 +1061,10 @@ def stage_workspace(
         fixture_target = workspace / relative
         if not fixture_source.exists() and not fixture_source.is_symlink():
             if strict:
-                raise ValueError(f"declared fixture path is missing: {relative}")
+                raise ValueError(f"已声明的 fixture 路径不存在：{relative}")
             continue
         if fixture_source.is_symlink():
-            raise ValueError(f"declared fixture path must not be a symlink: {relative}")
+            raise ValueError(f"已声明的 fixture 路径不能是符号链接：{relative}")
         fixture_target.parent.mkdir(parents=True, exist_ok=True)
         if fixture_source.is_dir() and not fixture_source.is_symlink():
             shutil.copytree(fixture_source, fixture_target, dirs_exist_ok=True)
@@ -1000,6 +1076,14 @@ def stage_workspace(
         staged_spec.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(task_spec, staged_spec)
     make_read_only(staged_spec)
+
+    # 该文件会进 workspace 完整性哈希，Agent 改动它会在评分前被判失败。
+    settings_path = workspace / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(CC_WORKSPACE_SETTINGS, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return staged_spec
 
 
@@ -1036,7 +1120,7 @@ def stage_evaluation_source(source: Path, evaluation_dir: Path) -> Path:
     """Create a trusted, per-roll copy of evaluation assets outside Agent cwd."""
     evaluation_source = source.resolve() / EVALUATION_DIR
     if not evaluation_source.is_dir():
-        raise ValueError("evaluation source not found: 02-evaluation")
+        raise ValueError("未找到 evaluation 源目录：02-evaluation")
     shutil.copytree(
         evaluation_source,
         evaluation_dir,
@@ -1215,10 +1299,10 @@ def run_command(
         if deadline is not None and not timed_out and now >= deadline and process.poll() is None:
             timed_out = True
             if live_label:
-                print(f"[veriforge][{live_label}] timeout reached; sending SIGTERM", flush=True)
+                print(f"[veriforge][{live_label}] 已超时，正在发送 SIGTERM", flush=True)
             stop_process()
             if live_label:
-                print(f"[veriforge][{live_label}] process stopped after timeout escalation", flush=True)
+                print(f"[veriforge][{live_label}] 超时升级后进程已终止", flush=True)
         if (
             live_label
             and next_heartbeat is not None
@@ -1227,7 +1311,7 @@ def run_command(
         ):
             elapsed = int(now - started)
             limit = f"/{int(timeout)}s" if timeout is not None else ""
-            print(f"[veriforge][{live_label}] still running ({elapsed}s{limit})", flush=True)
+            print(f"[veriforge][{live_label}] 仍在运行（已用 {elapsed}s{limit}）", flush=True)
             next_heartbeat = now + float(heartbeat_seconds)
         wait_for = 0.25
         if next_heartbeat is not None:
@@ -1271,7 +1355,7 @@ def run_roll(
     started = utc_now()
 
     def step(number: int, message: str) -> None:
-        print(f"[veriforge] roll {index}/{args.rolls} step {number}/6: {message}", flush=True)
+        print(f"[veriforge] 第 {index}/{args.rolls} 次 roll 步骤 {number}/6：{message}", flush=True)
 
     roll_dir = args.results_dir.resolve() / f"roll-{index}"
     workspace = roll_dir / "workspace"
@@ -1281,7 +1365,7 @@ def run_roll(
     scorer_result_path = roll_dir / "scorer-result.json"
     roll_dir.mkdir(parents=True, exist_ok=False)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    step(1, "prepare isolated roll and benchmark integrity controls")
+    step(1, "准备隔离的 roll 目录和 benchmark 完整性控制")
     for private_dir in (roll_dir / "home", roll_dir / "config", roll_dir / "cache"):
         private_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1376,7 +1460,7 @@ def run_roll(
         "trace_tool_calls_available": bool((model.get("trace") or {}).get("tool_calls", False)),
         "status": "dry_run" if args.dry_run else "pending",
     }
-    step(2, "stage Agent workspace, fixtures, and trusted evaluation copy")
+    step(2, "暂存 Agent workspace、fixture 和可信 evaluation 副本")
     if args.dry_run:
         scorer_result_path.write_text(
             json.dumps({"status": "not_run", "reason": "dry_run"}, indent=2) + "\n",
@@ -1402,7 +1486,7 @@ def run_roll(
         ),
         harness=harness,
     )
-    step(3, f"start {(harness or {}).get('display_name', 'Agent')} in {workspace}")
+    step(3, f"在 {workspace} 中启动 {(harness or {}).get('display_name', 'Agent')}")
     try:
         returncode, stdout, stderr, timed_out = run_command(
             command,
@@ -1434,7 +1518,7 @@ def run_roll(
         if provider_index.is_file():
             record["trace_index"] = str(provider_index)
             record["trace_events"] = str(trace_dir / "events.jsonl")
-    print(f"[veriforge] roll {index}/{args.rolls}: trace={trace_paths['trace_index']}", flush=True)
+    print(f"[veriforge] 第 {index}/{args.rolls} 次 roll：trace={trace_paths['trace_index']}", flush=True)
     record["agent_stdout_log"] = str(logs_dir / "agent.stdout.log")
     record["agent_stderr_log"] = str(logs_dir / "agent.stderr.log")
     record["returncode"] = returncode
@@ -1458,52 +1542,57 @@ def run_roll(
     record["source_integrity"] = source_integrity_after == source_integrity_before
     record["evaluation_integrity"] = evaluation_hash_after == evaluation_hash_before
     record["workspace_integrity"] = protected_workspace_after == protected_workspace_before
+    output_symlinks = find_output_symlinks(output_dir)
+    record["output_integrity"] = not output_symlinks
+    if output_symlinks:
+        record["output_symlinks"] = output_symlinks
     integrity_ok = (
         record["task_spec_integrity"]
         and record["fixture_integrity"]
         and record["source_integrity"]
         and record["evaluation_integrity"]
         and record["workspace_integrity"]
+        and record["output_integrity"]
     )
     record["status"] = "failed" if returncode != 0 or not integrity_ok else "pending"
     if timed_out:
         record["timeout_seconds"] = profile.get("timeout_seconds")
-    step(4, "collect Agent output and verify task, fixture, source, evaluation, and workspace integrity")
+    step(4, "收集 Agent 输出，校验任务、fixture、source、evaluation 和 workspace 完整性")
     if returncode != 0:
         for stream_name, stream in (("stdout", stdout), ("stderr", stderr)):
             diagnostic = redact_diagnostic(stream or "", credential)
             if diagnostic:
                 record[f"agent_{stream_name}_tail"] = diagnostic
-                print(f"[veriforge] agent {stream_name}: {diagnostic}", file=sys.stderr, flush=True)
-        print(f"[veriforge] roll {index}/{args.rolls}: agent failed (exit {returncode})", flush=True)
+                print(f"[veriforge] Agent {stream_name}：{diagnostic}", file=sys.stderr, flush=True)
+        print(f"[veriforge] 第 {index}/{args.rolls} 次 roll：Agent 失败（退出码 {returncode}）", flush=True)
     else:
-        print(f"[veriforge] roll {index}/{args.rolls}: agent finished", flush=True)
+        print(f"[veriforge] 第 {index}/{args.rolls} 次 roll：Agent 已完成", flush=True)
 
     if returncode != 0:
-        step(5, "skip scorer because Agent exited with a non-zero status")
+        step(5, "Agent 以非零状态退出，跳过评分")
         record["scorer_status"] = "skipped_agent_failed"
         scorer_result_path.write_text(
-            json.dumps({"status": "failed", "reason": "agent failed before scoring"}, indent=2) + "\n",
+            json.dumps({"status": "failed", "reason": "Agent 在评分前失败"}, indent=2) + "\n",
             encoding="utf-8",
         )
     elif not integrity_ok:
-        step(5, "skip scorer because an integrity check failed")
+        step(5, "完整性校验失败，跳过评分")
         record["scorer_status"] = "skipped_integrity_failure"
         scorer_result_path.write_text(
             json.dumps(
                 {
                     "status": "failed",
-                    "reason": "benchmark controls or protected workspace paths changed during agent run",
+                    "reason": "Agent 运行期间 benchmark 控制文件或受保护的 workspace 路径被修改",
                 },
                 indent=2,
             )
             + "\n",
             encoding="utf-8",
         )
-        print(f"[veriforge] roll {index}/{args.rolls}: integrity check failed", flush=True)
+        print(f"[veriforge] 第 {index}/{args.rolls} 次 roll：完整性校验失败", flush=True)
     elif scorer_command:
-        step(5, "run trusted scorer and stream scorer diagnostics")
-        print(f"[veriforge] roll {index}/{args.rolls}: scoring", flush=True)
+        step(5, "运行可信 scorer 并实时输出评分诊断")
+        print(f"[veriforge] 第 {index}/{args.rolls} 次 roll：正在评分", flush=True)
         # The Agent can see the roll directory in legacy/custom adapters. Any
         # pre-existing result is untrusted; scorer stdout is authoritative.
         scorer_result_path.unlink(missing_ok=True)
@@ -1517,7 +1606,9 @@ def run_roll(
                 scorer_command,
                 cwd=evaluation_dir,
                 env=scorer_env,
-                timeout=profile.get("timeout_seconds"),
+                # scorer 是确定性校验，不该复用 Agent 的长超时：
+                # 复用会让一个死循环的 scorer 拖满整个 Agent 超时才被发现。
+                timeout=SCORER_TIMEOUT_SECONDS,
                 live_label=f"roll {index} scorer",
                 credential=credential,
                 heartbeat_seconds=15,
@@ -1541,13 +1632,13 @@ def run_roll(
         if not scorer_integrity:
             scorer_payload = {
                 "status": "failed",
-                "reason": "trusted evaluation assets changed during scoring",
+                "reason": "评分期间可信 evaluation 资产被修改",
                 "returncode": scorer_returncode,
             }
         elif scorer_payload is None:
             scorer_payload = {
                 "status": "failed",
-                "reason": "scorer did not emit a JSON object",
+                "reason": "scorer 没有输出 JSON 对象",
                 "returncode": scorer_returncode,
             }
         scorer_result_path.write_text(
@@ -1566,21 +1657,21 @@ def run_roll(
         record["scorer_stderr_log"] = str(logs_dir / "scorer.stderr.log")
         record["status"] = "passed" if record["scorer_status"] == "passed" else "failed"
         if scorer_timed_out:
-            record["scorer_timeout_seconds"] = profile.get("timeout_seconds")
+            record["scorer_timeout_seconds"] = SCORER_TIMEOUT_SECONDS
         print(
-            f"[veriforge] roll {index}/{args.rolls}: score={record.get('score')} status={record['status']}",
+            f"[veriforge] 第 {index}/{args.rolls} 次 roll：得分={record.get('score')} 状态={record['status']}",
             flush=True,
         )
     else:
-        step(5, "skip scorer because Agent failed or integrity check failed")
-    step(6, f"finish roll: {record.get('status', 'failed')}")
+        step(5, "Agent 失败或完整性校验失败，跳过评分")
+    step(6, f"本次 roll 结束：{record.get('status', 'failed')}")
     remove_evaluation_source(evaluation_dir)
     record["ended_at"] = utc_now()
     return record
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one allowlisted VeriForge model for N rolls")
+    parser = argparse.ArgumentParser(description="使用一个 allowlist 内的 VeriForge 模型运行 N 次 roll")
     parser.add_argument("--models-file", type=Path, default=Path("03-runner/models.yaml"))
     parser.add_argument("--task-id", default="unversioned-task")
     parser.add_argument("--model")
@@ -1589,13 +1680,13 @@ def parse_args() -> argparse.Namespace:
         "--harnesses-file",
         type=Path,
         default=Path("03-runner/harnesses.yaml"),
-        help="organizer-approved CC/Codex harness matrix",
+        help="主办方批准的 CC/Codex harness 矩阵",
     )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument(
         "--developer-mode",
         action="store_true",
-        help="enable local adapter/scorer/workspace overrides for development only",
+        help="仅供开发使用：启用本地 adapter/scorer/workspace 覆盖",
     )
     parser.add_argument("--rolls", type=int)
     parser.add_argument("--preflight", action="store_true")
@@ -1603,18 +1694,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--results-dir",
         type=Path,
-        help="result directory (defaults to results/<model>-<UTC timestamp>)",
+        help="结果目录（默认为 results/<模型>-<UTC 时间戳>）",
     )
     parser.add_argument("--task-spec", type=Path, default=Path("01-task/task.yaml"))
     parser.add_argument(
         "--workspace-source",
         type=Path,
-        help="clean task package to copy for every roll (defaults to the generated package root)",
+        help="每次 roll 复制的干净任务包（默认为生成的任务包根目录）",
     )
     parser.add_argument(
         "--scorer-command",
         nargs="+",
-        help="developer-only scorer command; it runs after a successful agent",
+        help="开发者专用的 scorer 命令；在 Agent 成功后执行",
     )
     parser.add_argument("--agent-command", nargs=argparse.REMAINDER)
     # Accept both ``--agent-command command`` and the conventional
@@ -1635,7 +1726,7 @@ def main() -> int:
     if not args.developer_mode and any(
         value is not None for value in (args.agent_command, args.scorer_command, args.workspace_source)
     ):
-        raise ValueError("--agent-command, --scorer-command, and --workspace-source require --developer-mode")
+        raise ValueError("--agent-command、--scorer-command 和 --workspace-source 需要 --developer-mode")
     catalog = load_catalog(args.models_file)
     harness_path = args.harnesses_file.resolve()
     if not harness_path.is_file() and args.harnesses_file == Path("03-runner/harnesses.yaml"):
@@ -1646,10 +1737,10 @@ def main() -> int:
     if harness_path.is_file():
         harness_catalog = load_harness_catalog(harness_path)
     elif args.harness:
-        raise ValueError(f"harnesses file not found: {harness_path}")
+        raise ValueError(f"未找到 harness 矩阵文件：{harness_path}")
     else:
         if not args.developer_mode:
-            raise ValueError(f"harnesses file not found: {harness_path}")
+            raise ValueError(f"未找到 harness 矩阵文件：{harness_path}")
         # Old developer-only packages may not have the new matrix yet. They
         # continue to work through the legacy provider adapter; generated
         # participant packages always ship harnesses.yaml.
@@ -1657,12 +1748,14 @@ def main() -> int:
             "harnesses": [dict(value, id=key) for key, value in CANONICAL_HARNESSES.items()],
         }
     roll_policy = catalog.get("roll_policy", {})
+    default_rolls = roll_policy.get("default_rolls", 1)
+    rolls_from_cli = args.rolls is not None
     if args.rolls is None:
-        args.rolls = roll_policy.get("default_rolls", 1)
+        args.rolls = default_rolls
     min_rolls = roll_policy.get("min_rolls", 1)
     max_rolls = roll_policy.get("max_rolls", args.rolls)
     if args.rolls < min_rolls or args.rolls > max_rolls:
-        raise ValueError(f"--rolls must be between {min_rolls} and {max_rolls}")
+        raise ValueError(f"--rolls 必须在 {min_rolls} 到 {max_rolls} 之间")
 
     harnesses = resolve_harnesses(harness_catalog, args)
     harness = harnesses[0]
@@ -1676,23 +1769,23 @@ def main() -> int:
         if not executable:
             variable = harness.get("executable_env", "")
             raise ValueError(
-                f"{harness.get('display_name', harness['id'])} CLI not found; "
-                f"install {harness.get('executable')} or set {variable}"
+                f"未找到 {harness.get('display_name', harness['id'])} CLI；"
+                f"请安装 {harness.get('executable')}，或设置 {variable} 指定路径"
             )
         if harness.get("executable_env"):
             os.environ[harness["executable_env"]] = executable
     args.task_spec = args.task_spec.resolve()
     if not args.task_spec.is_file():
         if args.preflight:
-            print(f"task spec not found: {args.task_spec}", file=sys.stderr)
+            print(f"未找到任务定义文件：{args.task_spec}", file=sys.stderr)
             return 2
-        raise ValueError(f"task spec not found: {args.task_spec}")
+        raise ValueError(f"未找到任务定义文件：{args.task_spec}")
     task = validate_task_spec(args.task_spec)
     if args.task_id == "unversioned-task" and isinstance(task.get("task_id"), str):
         args.task_id = task["task_id"]
     args.workspace_source = (args.workspace_source or infer_workspace_source(args.task_spec)).resolve()
     if not args.workspace_source.is_dir():
-        raise ValueError(f"workspace source not found: {args.workspace_source}")
+        raise ValueError(f"未找到 workspace 源：{args.workspace_source}")
     validate_generated_package(
         args.workspace_source,
         args.agent_command,
@@ -1708,12 +1801,12 @@ def main() -> int:
         missing = check_credentials(models) if selected_for_check else []
         for entry in harnesses:
             found = find_harness_executable(entry)
-            state = "ready" if found else "missing"
-            print(f"{entry['id']}: harness {state} ({entry.get('executable')})")
+            state = "可用" if found else "缺失"
+            print(f"{entry['id']}：harness {state}（{entry.get('executable')}）")
         for model in models:
             variable = model.get("credential_env")
-            state = "ready" if not variable or os.environ.get(variable) else "missing"
-            print(f"{model['id']}: credential {state} ({variable or 'none'})")
+            state = "可用" if not variable or os.environ.get(variable) else "缺失"
+            print(f"{model['id']}：凭据 {state}（{variable or '无'}）")
         if missing and not args.dry_run:
             return 2
         return 0
@@ -1734,6 +1827,9 @@ def main() -> int:
         atexit.register(remove_source_snapshot, source_snapshot)
 
     model = models[0]
+    # 命令行显式给了 --rolls 就不再提问；非交互场景（CI）也不提问。
+    if not rolls_from_cli and (args.interactive or sys.stdin.isatty()):
+        args.rolls = choose_rolls(min_rolls, max_rolls, default_rolls)
     if args.results_dir is None:
         args.results_dir = default_results_dir(model["id"])
     print(f"[veriforge] 已选择 harness: {harness.get('display_name', harness['id'])} ({harness['id']})")
@@ -1744,14 +1840,14 @@ def main() -> int:
     credential = os.environ.get(credential_env) if credential_env else None
     if not credential and not args.dry_run:
         if not credential_env:
-            raise ValueError(f"model {model['id']} has no credential_env")
+            raise ValueError(f"模型 {model['id']} 未声明 credential_env")
         if not sys.stdin.isatty():
-            raise ValueError(f"missing runtime credential: {credential_env}")
+            raise ValueError(f"缺少运行时凭据：{credential_env}")
         credential = getpass.getpass(
             f"请输入 {model.get('display_name', model['id'])} 的 API Key（输入内容不会显示）: "
         )
         if not credential:
-            raise ValueError("API Key cannot be empty")
+            raise ValueError("API Key 不能为空")
 
     digest = catalog_hash(catalog)
     task_spec_digest = hashlib.sha256(args.task_spec.read_bytes()).hexdigest()
@@ -1760,9 +1856,9 @@ def main() -> int:
     args.results_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.results_dir / "run-manifest.json"
     if not args.dry_run and manifest_path.exists():
-        raise ValueError(f"results directory already contains a run manifest: {manifest_path}")
+        raise ValueError(f"结果目录中已存在运行清单：{manifest_path}")
     if not args.dry_run and any(args.results_dir.glob("roll-*")):
-        raise ValueError(f"results directory already contains roll artifacts: {args.results_dir}")
+        raise ValueError(f"结果目录中已存在 roll 产物：{args.results_dir}")
     records = []
     profile = resolve_profile(catalog, model)
     for roll in range(1, args.rolls + 1):
@@ -1799,7 +1895,7 @@ def main() -> int:
         print(f"[veriforge] 完成: 已生成 {len(records)} 个 dry-run 记录（未调用模型或评分）")
     else:
         passed_count = sum(record["status"] == "passed" for record in records)
-        print(f"[veriforge] 完成: {passed_count}/{len(records)} rolls passed")
+        print(f"[veriforge] 完成：{len(records)} 次 roll 中通过 {passed_count} 次")
     print(f"[veriforge] 运行清单: {output}")
     if source_snapshot is not None:
         remove_source_snapshot(source_snapshot)
@@ -1810,5 +1906,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"错误：{exc}", file=sys.stderr)
         raise SystemExit(2)
