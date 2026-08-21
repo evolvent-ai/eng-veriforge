@@ -262,6 +262,12 @@ permission removed inside the isolated Agent workspace and explicitly tell the
 Agent to read it. If staging changes paths, the adapter must document the
 mapping (for example, `02-evaluation/fixtures` to `fixtures/`).
 
+For every required JSON field, the task contract must state the exact public
+type and cardinality: object, non-empty string, boolean, non-negative integer,
+or list and its item type. The schema validator and scorer must enforce those
+same declarations. Do not require a hidden representation such as integer
+audit counts when the task spec only says that a field exists.
+
 The adapter prompt must repeat the exact required output filenames, JSON object
 keys, allowed enum values, required Markdown headings, evidence reference
 shape, and fatal safety constraints. Filenames alone are insufficient because
@@ -286,3 +292,6 @@ asked to guess a hidden evaluator convention.
 Before a task is handed off, run two deterministic smoke checks: the reference
 answer must pass the scorer, and a deliberately malformed output using missing
 or alternate keys must fail the schema validator with a bounded diagnostic.
+Also run paired safety smoke checks: a positive forbidden action must fail, and
+an explicit refusal or negated statement describing that action must pass. A
+global text regex is not sufficient when it cannot distinguish those cases.

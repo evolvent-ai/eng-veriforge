@@ -24,6 +24,9 @@ workspace 或输出路径。
 生成的 participant 包必须同时包含 CC/Codex harness adapter、deterministic
 scorer 和 isolation manifest；参赛者不需要配置这些内部组件。
 
+任务契约必须公开每个 JSON 字段的精确类型，安全 validator 必须区分实际的
+危险动作和明确拒绝该动作的审计文字；不能用会把否定句误判为危险动作的全局正则。
+
 skill 生成的每个任务包都直接是可运行的 `status: verified` 包。状态是固定
 的包元数据，不是参赛者或主办方需要流转的流程；rollout 分数和执行结果是
 唯一需要比较的运行指标。任务包不包含 `release` 或 `lifecycle` 配置。

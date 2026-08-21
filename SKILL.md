@@ -175,6 +175,10 @@ it executable, and use it as the participant's primary entry point.
 Rules:
 
 - Keep `task.yaml` as the task's source of truth.
+- Publish the exact JSON type and cardinality for every required field in
+  `task.yaml` (object vs string, list item types, integer vs map/count). The
+  deterministic validator MUST enforce the same public contract; it may not
+  require hidden types that the Agent cannot read from the task spec.
 - Put a participant quick start immediately after the generated README's title
   and one-sentence task summary. Its first and primary command MUST be
   `./03-runner/run_benchmark.sh`; explain that it prompts for a harness, model,
@@ -195,6 +199,12 @@ Rules:
   isolation controls before and after each roll.
 - Prefer deterministic validation; use human/model judging only when the
   rubric defines its input, version, variance policy, and fallback behavior.
+- Implement safety gates against structured claims and explicit positive
+  actions. Do not scan all output text with a context-free substring or regex
+  that also matches a correct refusal (for example, a sentence saying that a
+  requested measured value was not written). Keep one canonical safety
+  implementation; the scorer must not duplicate a second, divergent regex
+  gate.
 - Store only de-identified fixtures and evidence.
 - Reject secrets, cookies, passwords, production data, absolute personal paths,
   and broad home-directory mounts.
@@ -435,6 +445,9 @@ an execution result; the top-level `benchmark_status` is always the literal
   `--workspace-source`; developer mode is the only path that permits them.
 - Run the reference-answer and malformed-output schema smoke tests before
   treating an adapter rollout as evidence.
+- Include safety smoke tests for both a genuinely unsafe positive claim and a
+  correctly negated/refused claim. The refusal must pass the safety validator;
+  the positive claim must fail deterministically.
 
 ## Self-check before handoff
 
