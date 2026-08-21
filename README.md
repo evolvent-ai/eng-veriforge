@@ -21,8 +21,10 @@ workspace 或输出路径。
 2. 评测资产：标答、fixture、rubric、验证器和评分器。
 3. 执行脚本：隔离 harness、Agent 调用、固定模型/超参、评分和 `N` 次 roll 聚合。
 
-生成的 participant 包必须同时包含 CC/Codex harness adapter、deterministic
-scorer 和 isolation manifest；参赛者不需要配置这些内部组件。
+生成的 participant 包必须同时包含 CC/Codex harness adapter、可信的
+OpenAI Chat Completions adapter、deterministic scorer 和 isolation manifest；
+参赛者不需要配置这些内部组件。Chat 模型始终走 `/chat/completions`，不会
+被错误地送到 Codex 的 `/responses` 协议。
 
 任务契约必须公开每个 JSON 字段的精确类型，安全 validator 必须区分实际的
 危险动作和明确拒绝该动作的审计文字；不能用会把否定句误判为危险动作的全局正则。
@@ -135,7 +137,9 @@ adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON
 和 `VERIFORGE_PROVIDER_REQUEST_JSON`：OpenAI Responses 使用
 `reasoning.effort`/`max_output_tokens`，Anthropic 使用
 `output_config.effort`/`max_tokens`，Kimi、Qwen、DeepSeek Chat 使用
-`reasoning_effort`/`max_tokens`。任务 adapter 必须使用转换后的字段。
+`reasoning_effort`/`max_tokens`。Chat adapter 默认请求
+`response_format: {"type":"json_object"}`；若兼容网关明确返回 400 拒绝
+该可选参数，只移除这个参数重试一次，仍由 envelope parser 强制 JSON 文件契约。
 
 生成包中的 `03-runner/isolation-manifest.yaml` 声明 fixture、只读和可写
 路径。runner 会在每个 roll 前后校验所有 read-only 路径、fixture、task spec

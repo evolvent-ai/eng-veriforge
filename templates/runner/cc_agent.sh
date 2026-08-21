@@ -67,6 +67,7 @@ unset VERIFORGE_ROLL_DIR VERIFORGE_SCORER_RESULT
 exec "$claude_bin" -p "$(<"$prompt_file")" \
   --model "$VERIFORGE_MODEL_NAME" \
   --output-format stream-json \
+  --verbose \
   --permission-mode acceptEdits \
   --tools "Read,Write,Edit,Glob,Grep" \
   --no-session-persistence \

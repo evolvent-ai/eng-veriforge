@@ -274,15 +274,17 @@ shape, and fatal safety constraints. Filenames alone are insufficient because
 an Agent can produce a plausible but validator-incompatible schema. The
 adapter must reject missing outputs or non-zero Agent exits before scoring.
 
-The default generated adapters are `03-runner/cc_agent.sh` and
-`03-runner/codex_agent.sh`. They receive one provider-neutral runtime key, stage
+The default generated adapters are `03-runner/cc_agent.sh`,
+`03-runner/codex_agent.sh`, and the trusted `03-runner/provider_agent.py` Chat
+adapter. They receive one provider-neutral runtime key, stage
 the complete contract in the isolated workspace, invoke only the selected CLI,
 and write declared outputs under `VERIFORGE_OUTPUT_DIR`. CC uses the selected
 model's approved Anthropic-compatible variables; Codex uses a per-roll
 Responses-compatible provider config. The
 participant runner invokes the selected harness and then
-`02-evaluation/scorer.py`. `provider_agent.py`, if present, is developer-only
-legacy code and is never the participant default.
+`02-evaluation/scorer.py`. For `openai_chat` models, `codex_agent.sh` invokes
+the trusted adapter, which posts to `/chat/completions`, applies bounded
+retries, and validates the exact output envelope before writing files.
 
 Every string field that the scorer compares exactly must have its closed
 codebook declared in `task.yaml` and repeated in the adapter prompt. Exact-match

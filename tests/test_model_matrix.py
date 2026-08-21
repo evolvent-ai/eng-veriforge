@@ -26,6 +26,7 @@ WRAPPER_PATH = ROOT / "templates" / "runner" / "run_benchmark.sh"
 MATRIX_PATH = ROOT / "examples" / "activity-models.yaml"
 HARNESSES_PATH = ROOT / "templates" / "runner" / "harnesses.yaml"
 CODEX_AGENT_PATH = ROOT / "templates" / "runner" / "codex_agent.sh"
+PROVIDER_AGENT_PATH = ROOT / "templates" / "runner" / "provider_agent.py"
 
 
 def load_runner():
@@ -243,9 +244,9 @@ class CanonicalMatrixTests(unittest.TestCase):
         expected = {
             "claude-opus-5": {"output_config": {"effort": "max"}, "max_tokens": 32768},
             "gpt-5.6-sol": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
-            "qwen3.8-max": {"reasoning_effort": "max", "max_tokens": 32768},
-            "kimi-k3": {"reasoning_effort": "max", "max_tokens": 32768},
-            "deepseek-v4-pro": {"reasoning_effort": "max", "max_tokens": 32768},
+            "qwen3.8-max": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
+            "kimi-k3": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
+            "deepseek-v4-pro": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
         }
         for model in self.matrix["models"]:
             with self.subTest(model=model["id"]):
@@ -253,6 +254,20 @@ class CanonicalMatrixTests(unittest.TestCase):
                     RUNNER.build_provider_parameters(model, model["profiles"][0]),
                     expected[model["id"]],
                 )
+
+    def test_chat_adapter_is_shipped_and_validates_missing_response_fields(self):
+        self.assertTrue(PROVIDER_AGENT_PATH.is_file())
+        source = PROVIDER_AGENT_PATH.read_text(encoding="utf-8")
+        self.assertIn("response_format", source)
+        self.assertIn("choices[0].message.content", source)
+        self.assertIn("MAX_PROVIDER_ATTEMPTS", source)
+        module_spec = importlib.util.spec_from_file_location("provider_adapter", PROVIDER_AGENT_PATH)
+        self.assertIsNotNone(module_spec)
+        module = importlib.util.module_from_spec(module_spec)
+        assert module_spec.loader is not None
+        module_spec.loader.exec_module(module)
+        with self.assertRaises(module.ProviderRequestError):
+            module.response_text("openai_chat", {})
 
     def test_rolls_have_isolated_workspaces_logs_and_read_only_spec(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -603,6 +618,9 @@ class CanonicalMatrixTests(unittest.TestCase):
                 "03-runner/harness.allowlist.yaml",
                 "03-runner/dependency-manifest.yaml",
                 "03-runner/isolation-manifest.yaml",
+                "03-runner/cc_agent.sh",
+                "03-runner/codex_agent.sh",
+                "03-runner/provider_agent.py",
                 "02-evaluation/fixtures/input.txt",
             ):
                 path = source / relative

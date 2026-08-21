@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from contextlib import suppress
 import getpass
 import hashlib
@@ -29,7 +30,7 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v2.1"
+RUNNER_VERSION = "veriforge-runner/v2.5"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
@@ -45,6 +46,9 @@ CONTROL_PATHS = {
     "allowlist": "03-runner/harness.allowlist.yaml",
     "dependency_manifest": "03-runner/dependency-manifest.yaml",
     "isolation_manifest": "03-runner/isolation-manifest.yaml",
+    "cc_agent": "03-runner/cc_agent.sh",
+    "codex_agent": "03-runner/codex_agent.sh",
+    "provider_agent": "03-runner/provider_agent.py",
 }
 CANONICAL_MODELS = {
     "kimi-k3": {
@@ -137,6 +141,7 @@ def _openai_chat_parameters(parameters: dict) -> dict:
     return {
         "reasoning_effort": parameters["reasoning_effort"],
         "max_tokens": parameters["max_output_tokens"],
+        "response_format": {"type": "json_object"},
     }
 
 
@@ -524,7 +529,7 @@ def resolve_agent_command(
     explicit: list[str] | None,
     harness_id: str | None = None,
 ) -> list[str]:
-    """Resolve the selected real harness; keep provider_agent as legacy fallback."""
+    """Resolve the selected harness wrapper and its trusted provider adapter."""
     if explicit:
         return explicit
     if harness_id == "cc":
@@ -582,6 +587,7 @@ def validate_generated_package(
             source / "03-runner" / "harness.allowlist.yaml",
             source / "03-runner" / "dependency-manifest.yaml",
             source / "03-runner" / "isolation-manifest.yaml",
+            source / "03-runner" / "provider_agent.py",
         )
         missing = [str(path.relative_to(source)) for path in required if not path.exists()]
         if missing:
@@ -862,6 +868,35 @@ def stage_workspace(
         shutil.copy2(task_spec, staged_spec)
     make_read_only(staged_spec)
     return staged_spec
+
+
+def create_source_snapshot(source: Path) -> Path:
+    """Freeze the participant package for the lifetime of one benchmark run."""
+    source = source.resolve()
+    parent = Path(tempfile.mkdtemp(prefix="veriforge-source-"))
+    snapshot = parent / source.name
+
+    def ignore_runtime(_path: str, names: list[str]) -> set[str]:
+        return {
+            name
+            for name in names
+            if name in {"results", ".git", "__pycache__", ".pytest_cache"}
+        }
+
+    try:
+        shutil.copytree(source, snapshot, ignore=ignore_runtime)
+    except Exception:
+        with suppress(Exception):
+            shutil.rmtree(parent)
+        raise
+    return snapshot
+
+
+def remove_source_snapshot(snapshot: Path) -> None:
+    """Best-effort cleanup for the immutable per-run package snapshot."""
+    remove_evaluation_source(snapshot)
+    with suppress(OSError):
+        snapshot.parent.rmdir()
 
 
 def stage_evaluation_source(source: Path, evaluation_dir: Path) -> Path:
@@ -1476,7 +1511,9 @@ def main() -> int:
     # A matrix-only preflight validates every harness; interactive and explicit
     # runs select exactly one harness and can filter the model choices.
     args.harness_id = harness.get("id") if harness_path.is_file() and len(harnesses) == 1 else None
-    if len(harnesses) == 1 and not args.dry_run:
+    models = resolve_models(catalog, args)
+    chat_adapter_run = len(models) == 1 and models[0].get("adapter") == "openai_chat"
+    if len(harnesses) == 1 and not args.dry_run and not chat_adapter_run:
         executable = find_harness_executable(harness)
         if not executable:
             variable = harness.get("executable_env", "")
@@ -1486,7 +1523,6 @@ def main() -> int:
             )
         if harness.get("executable_env"):
             os.environ[harness["executable_env"]] = executable
-    models = resolve_models(catalog, args)
     args.task_spec = args.task_spec.resolve()
     if not args.task_spec.is_file():
         if args.preflight:
@@ -1523,6 +1559,21 @@ def main() -> int:
         if missing and not args.dry_run:
             return 2
         return 0
+
+    # Freeze the validated package before collecting a credential or starting
+    # any roll. This prevents an editor/IDE save during a long run from
+    # changing the source hash and invalidating an otherwise usable score.
+    source_snapshot = None
+    if not args.dry_run:
+        source_root = args.workspace_source
+        source_snapshot = create_source_snapshot(source_root)
+        try:
+            relative_task = args.task_spec.relative_to(source_root)
+        except ValueError:
+            relative_task = Path("01-task/task.yaml")
+        args.workspace_source = source_snapshot
+        args.task_spec = source_snapshot / relative_task
+        atexit.register(remove_source_snapshot, source_snapshot)
 
     model = models[0]
     if args.results_dir is None:
@@ -1592,6 +1643,8 @@ def main() -> int:
         passed_count = sum(record["status"] == "passed" for record in records)
         print(f"[veriforge] 完成: {passed_count}/{len(records)} rolls passed")
     print(f"[veriforge] 运行清单: {output}")
+    if source_snapshot is not None:
+        remove_source_snapshot(source_snapshot)
     return 0 if all(record["status"] in {"dry_run", "passed"} for record in records) else 1
 
 

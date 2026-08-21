@@ -155,7 +155,7 @@ Use this layout:
 │   ├── harnesses.yaml
 │   ├── cc_agent.sh
 │   ├── codex_agent.sh
-│   ├── provider_agent.py       # legacy developer-only smoke adapter
+│   ├── provider_agent.py       # trusted OpenAI Chat Completions adapter
 │   ├── isolation-manifest.yaml
 │   ├── models.yaml
 │   ├── harness.allowlist.yaml
@@ -187,10 +187,11 @@ Rules:
 - Keep task IDs and output paths identical across task, rubric, scorer, and
   runner.
 - Every participant-facing package MUST include `harnesses.yaml`, executable
-  `cc_agent.sh` and `codex_agent.sh`, plus a deterministic
-  `02-evaluation/scorer.py`. The participant runner resolves only the selected
-  harness script; `provider_agent.py` may remain as a developer-only legacy
-  adapter but is never preferred for participant runs.
+  `cc_agent.sh` and `codex_agent.sh`, the trusted `provider_agent.py` Chat
+  Completions adapter, plus a deterministic `02-evaluation/scorer.py`. For
+  `openai_chat` models, the Codex wrapper dispatches to this adapter and records
+  the actual `/chat/completions` protocol; it must never silently send a Chat
+  model to `/responses`.
 - Every participant-facing package MUST include
   `03-runner/isolation-manifest.yaml` with relative fixture, read-only, and
   mutable paths. The runner keeps scorer/reference/rubric/validator assets out
@@ -279,7 +280,12 @@ leaves the model to invent a JSON schema.
 Before handoff, run a schema smoke test that confirms the reference answer
 passes the scorer and a deliberately malformed alternate-key output fails with
 a deterministic schema error. Then run the adapter once end to end and retain
-the score and failure diagnostics in the local evidence directory.
+the score and failure diagnostics in the local evidence directory. Chat adapters
+must request JSON mode where supported, retry transient HTTP/connection errors
+and malformed model output a bounded number of times, and retry once without
+the optional JSON-mode parameter when a compatible gateway explicitly rejects
+it. Missing or malformed provider response fields must become bounded,
+redacted diagnostics rather than raw `KeyError` exceptions.
 
 The participant runner must support:
 
@@ -360,9 +366,9 @@ and the selected model's `VERIFORGE_ADAPTER`, `VERIFORGE_ENDPOINT`, and
 `VERIFORGE_BASE_URL` environment variables. The runner MUST resolve the
 canonical profile through a provider adapter and expose the resulting native
 request fragment in `VERIFORGE_NATIVE_PARAMETERS_JSON` and
-`VERIFORGE_PROVIDER_REQUEST_JSON`; the legacy direct adapter may use that
-fragment, while CC/Codex receive the fixed profile through their harness
-configuration. Never forward canonical keys verbatim when a native mapping is
+`VERIFORGE_PROVIDER_REQUEST_JSON`; the trusted Chat adapter uses that fragment,
+while CC/Codex receive the fixed profile through their harness configuration.
+Never forward canonical keys verbatim when a native mapping is
 available. The built-in
 mapping is:
 
@@ -436,9 +442,12 @@ an execution result; the top-level `benchmark_status` is always the literal
   logs under each roll directory.
 - Test every provider adapter's canonical-to-native parameter mapping and
   record the resolved native request in the roll manifest.
+- Test Chat Completions with a mock 503/connection close, malformed JSON,
+  missing `choices/message/content`, successful JSON-mode output, and a 400
+  JSON-mode rejection. Confirm retries are bounded and diagnostics are redacted.
 - Test both harness selections and automatic scorer discovery with no
-  participant command-line overrides; ensure `provider_agent.py` is never the
-  participant default.
+  participant command-line overrides; ensure Chat models use the trusted
+  `provider_agent.py` and Responses models use Codex CLI.
 - Test that a task-spec, declared read-only path, protected control, or
   undeclared workspace modification fails before scoring.
 - Test that participant mode rejects `--agent-command`, `--scorer-command`, and
