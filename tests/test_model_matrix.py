@@ -67,11 +67,12 @@ class CanonicalMatrixTests(unittest.TestCase):
 
     def test_canonical_matrix_declares_trace_capabilities(self):
         models = {model["id"]: model for model in self.matrix["models"]}
-        self.assertEqual(models["qwen3.8-max"]["trace"]["mode"], "chat_tool_loop")
-        self.assertEqual(models["kimi-k3"]["trace"]["mode"], "chat_tool_loop")
-        self.assertEqual(models["deepseek-v4-pro"]["trace"]["mode"], "chat_tool_loop")
-        self.assertEqual(models["gpt-5.6-sol"]["trace"]["mode"], "native_cli_stream")
-        self.assertEqual(models["claude-opus-5"]["trace"]["mode"], "native_cli_stream")
+        # 五个模型全部通过 CC/Codex CLI 运行，因此 trace 模式统一是
+        # native_cli_stream；chat_tool_loop 保留给不经 CLI 的遗留直连 adapter。
+        for model_id, model in models.items():
+            with self.subTest(model=model_id):
+                self.assertEqual(model["trace"]["mode"], "native_cli_stream")
+                self.assertTrue(model["trace"]["streaming"])
 
     def test_mixed_provider_harness_matrix_is_accepted(self):
         catalog = RUNNER.load_harness_catalog(HARNESSES_PATH)
@@ -81,13 +82,23 @@ class CanonicalMatrixTests(unittest.TestCase):
     def test_harness_filters_model_choices_without_changing_selection_flow(self):
         args = type("Args", (), {"harness_id": "cc", "preflight": True, "model": None, "interactive": False})()
         models = RUNNER.resolve_models(self.matrix, args)
-        self.assertEqual([model["id"] for model in models], ["claude-opus-5"])
+        self.assertEqual({model["id"] for model in models}, {"claude-opus-5", "kimi-k3"})
         args.harness_id = "codex"
         models = RUNNER.resolve_models(self.matrix, args)
         self.assertEqual(
             {model["id"] for model in models},
-            {"gpt-5.6-sol", "qwen3.8-max", "kimi-k3", "deepseek-v4-pro"},
+            {"gpt-5.6-sol", "qwen3.8-max", "deepseek-v4-pro"},
         )
+
+    def test_every_model_protocol_matches_its_harness(self):
+        """Codex 只接受 Responses 协议，CC 只接受 Anthropic 协议。
+        协议与 harness 不匹配的模型在运行时必然失败（404 或握手错误），
+        因此矩阵层面就要保证一致。"""
+        required_adapter = {"cc": "anthropic_messages", "codex": "openai_responses"}
+        for model in self.matrix["models"]:
+            for harness_id in model["supported_harnesses"]:
+                with self.subTest(model=model["id"], harness=harness_id):
+                    self.assertEqual(model["adapter"], required_adapter[harness_id])
 
     def test_harness_selection_never_prefers_provider_adapter(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -124,7 +135,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 2)
         self.assertIn("1. 选择 harness", completed.stdout)
-        self.assertIn("--rolls must be between", completed.stderr)
+        self.assertIn("--rolls 必须在", completed.stderr)
 
     def test_default_results_directory_names_model_and_timestamp(self):
         result_path = RUNNER.default_results_dir("gpt-5.6-sol")
@@ -223,7 +234,7 @@ class CanonicalMatrixTests(unittest.TestCase):
         self.assertEqual(child_env["VERIFORGE_API_KEY"], "runtime-secret")
         self.assertEqual(
             json.loads(child_env["VERIFORGE_NATIVE_PARAMETERS_JSON"]),
-            {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
+            {"reasoning": {"effort": "xhigh"}, "max_output_tokens": 32768},
         )
         self.assertEqual(
             {key for key in child_env if key.endswith("_API_KEY")},
@@ -248,13 +259,47 @@ class CanonicalMatrixTests(unittest.TestCase):
         script = (ROOT / "templates" / "runner" / "cc_agent.sh").read_text(encoding="utf-8")
         self.assertIn("--output-format stream-json", script)
 
+    def test_each_model_uses_its_own_highest_effort(self):
+        """推理档按模型固定：gpt-5.6-sol 的最高档是 xhigh，其余是 max。
+        向 provider 下发它不支持的档位会被拒绝或静默降级。"""
+        expected = {
+            "kimi-k3": "max",
+            "deepseek-v4-pro": "max",
+            "qwen3.8-max": "max",
+            "claude-opus-5": "max",
+            "gpt-5.6-sol": "xhigh",
+        }
+        self.assertEqual(RUNNER.FIXED_REASONING_EFFORT, expected)
+        for model in self.matrix["models"]:
+            with self.subTest(model=model["id"]):
+                parameters = model["profiles"][0]["parameters"]
+                self.assertEqual(parameters["reasoning_effort"], expected[model["id"]])
+                self.assertEqual(parameters["max_output_tokens"], RUNNER.FIXED_MAX_OUTPUT_TOKENS)
+
+    def test_harness_adapters_read_effort_from_profile(self):
+        """推理档必须来自 profile，不能硬编码。
+        写死档位会让 models.yaml 的固定参数失效，实际运行档位与矩阵声明不一致，
+        跨模型分数因此不可比。"""
+        codex = CODEX_AGENT_PATH.read_text(encoding="utf-8")
+        self.assertIn("VERIFORGE_NATIVE_PARAMETERS_JSON", codex)
+        self.assertIn('model_reasoning_effort = "$reasoning_effort"', codex)
+        self.assertNotIn('model_reasoning_effort = "xhigh"', codex)
+
+        self.assertIn("model_max_output_tokens = $max_output_tokens", codex)
+
+        cc = (ROOT / "templates" / "runner" / "cc_agent.sh").read_text(encoding="utf-8")
+        self.assertIn("VERIFORGE_NATIVE_PARAMETERS_JSON", cc)
+        self.assertIn("export CLAUDE_CODE_EFFORT_LEVEL", cc)
+        self.assertIn("export CLAUDE_CODE_MAX_OUTPUT_TOKENS", cc)
+
     def test_provider_adapters_translate_canonical_parameters(self):
         expected = {
             "claude-opus-5": {"output_config": {"effort": "max"}, "max_tokens": 32768},
-            "gpt-5.6-sol": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
-            "qwen3.8-max": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
-            "kimi-k3": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
-            "deepseek-v4-pro": {"reasoning_effort": "max", "max_tokens": 32768, "response_format": {"type": "json_object"}},
+            # gpt-5.6-sol 的最高档是 xhigh，不是 max
+            "gpt-5.6-sol": {"reasoning": {"effort": "xhigh"}, "max_output_tokens": 32768},
+            "qwen3.8-max": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
+            "kimi-k3": {"output_config": {"effort": "max"}, "max_tokens": 32768},
+            "deepseek-v4-pro": {"reasoning": {"effort": "max"}, "max_output_tokens": 32768},
         }
         for model in self.matrix["models"]:
             with self.subTest(model=model["id"]):
@@ -668,7 +713,7 @@ class CanonicalMatrixTests(unittest.TestCase):
             for override in overrides:
                 with self.subTest(override=override[0]):
                     sys.argv = [str(RUNNER_PATH), *override]
-                    with self.assertRaisesRegex(ValueError, "require --developer-mode"):
+                    with self.assertRaisesRegex(ValueError, "需要 --developer-mode"):
                         RUNNER.main()
         finally:
             sys.argv = original_argv

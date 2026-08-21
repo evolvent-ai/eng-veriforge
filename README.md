@@ -2,11 +2,45 @@
 
 VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任务构思或既有工作流制作成可验证的本地 Agent Benchmark。
 
-## 参赛者一键运行
+> **本仓库是「生成器」，不是 benchmark 本身。**
+> 直接在仓库根目录运行 `./03-runner/run_benchmark.sh` 是**无效**的——该路径只
+> 存在于生成出来的任务包里。请先按下面的步骤生成一个任务包。
 
-进入生成的 benchmark 目录，只运行：
+## 快速开始
+
+### 第 1 步：生成任务包骨架
 
 ```bash
+cd /path/to/eng-veriforge
+python3 scripts/new_task.py my-task --output-dir ~/benchmarks --title "我的任务"
+```
+
+这会在 `~/benchmarks/my-task/` 下拷齐 18 个必需文件、把 `task_id` 统一设为
+`my-task-v1`、给四个脚本加上可执行权限。生成的包**开箱即可运行**，但里面装的
+是示例任务（记录审阅），需要替换成你自己的内容。
+
+### 第 2 步：填写任务内容
+
+脚手架退出时会列出 7 项待办，核心是这几个：
+
+| 文件 | 要做什么 |
+| --- | --- |
+| `01-task/task.yaml` | 题干、输出契约、编码表、约束 |
+| `02-evaluation/fixtures/` | 替换成真实的去标识化输入数据 |
+| `02-evaluation/reference_answer/` | 写出满分标答 |
+| `02-evaluation/validators/*.py` | 保留函数签名，替换判定逻辑 |
+| `02-evaluation/rubric.yaml` + `scorer.py` | 对齐维度、权重、通过线 |
+| `03-runner/cc_agent.sh` + `codex_agent.sh` | 在 prompt 中复述输出契约 |
+
+改完后按 `references/task-contract.md` 的「一致性锚点」逐项核对，并跑四个
+scorer 用例（标答满分 / 替代 key 低分 / fatal 违规不通过 / 输出缺失 0 分）。
+
+### 第 3 步：交给参赛者运行
+
+参赛者拿到任务包后，在**任务包目录**里只需一条命令：
+
+```bash
+cd ~/benchmarks/my-task
 ./03-runner/run_benchmark.sh
 ```
 
@@ -14,6 +48,23 @@ VeriForge（可验证任务工坊）是一个标准 Agent Skill，用于把任�
 输入该模型的 API Key，然后默认自动执行 3 次隔离 rollout 和评分。每次运行使用新的
 `results/<model>-<timestamp>/` 目录，不需要配置 provider、adapter、scorer、
 workspace 或输出路径。
+
+运行前可以先检查环境：
+
+```bash
+python3 03-runner/run_task.py --preflight
+```
+
+## 作为 Claude Code Skill 使用
+
+如果希望由 Claude 帮你完成任务设计（而不是自己填空），把仓库软链到 skill 目录：
+
+```bash
+ln -s /path/to/eng-veriforge ~/.claude/skills/eng-veriforge
+```
+
+之后直接描述你想做的评测任务，Claude 会按 `SKILL.md` 的流程与你确认需求、调用
+脚手架、生成完整任务包并执行自检。
 
 ## 三类产物
 
@@ -51,9 +102,22 @@ skill 生成的每个任务包都直接是可运行的 `status: verified` 包。
 `examples/activity-models.yaml` 的 canonical matrix：`kimi-k3`、
 `deepseek-v4-pro`、`qwen3.8-max`、`claude-opus-5`、`gpt-5.6-sol`。无论任务
 是否 `local_only`，任务包都必须包含这五个模型，不能生成单模型例外或替换
-模型。五个模型各只有一个固定 `default` profile，推理档统一为 `max`，输出
+模型。五个模型各只有一个固定 `default` profile，推理档取各自的最高档
+（`gpt-5.6-sol` 为 `xhigh`，其余为 `max`），输出
 上限统一为 `32768`。runner 会拒绝缺失/额外/未知模型、额外 profile、参数
 不完整、provider 映射不一致或仍含 `REPLACE_WITH_*` 的配置。
+
+模型按协议分成两组，因为 Codex CLI 只接受 Responses 协议，CC 只接受 Anthropic
+Messages 协议：
+
+| harness | 模型 |
+| --- | --- |
+| Claude Code (CC) | `claude-opus-5`、`kimi-k3` |
+| Codex CLI | `gpt-5.6-sol`、`qwen3.8-max`、`deepseek-v4-pro` |
+
+`kimi-k3` 走 Moonshot 官方的 Anthropic 兼容端点，所以只支持 CC——Moonshot 的
+OpenAI 端点只有 Chat Completions，接到 Codex 上会 404。这样不需要引入任何本地
+协议转换层（如 CC Switch）。
 
 参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，先选择
 CC 或 Codex，再从该 harness 的兼容模型中选择一个，在运行时输入一次所选模型
@@ -141,12 +205,9 @@ scorer stdout 生成当前 roll 的结果文件；Agent 不能预写结果来覆
 
 固定 profile 的统一参数不会直接冒充厂商参数。runner 内置 provider
 adapter，并将转换后的请求片段放在 `VERIFORGE_NATIVE_PARAMETERS_JSON`
-和 `VERIFORGE_PROVIDER_REQUEST_JSON`：OpenAI Responses 使用
-`reasoning.effort`/`max_output_tokens`，Anthropic 使用
-`output_config.effort`/`max_tokens`，Kimi、Qwen、DeepSeek Chat 使用
-`reasoning_effort`/`max_tokens`。Chat adapter 默认请求
-`response_format: {"type":"json_object"}`；若兼容网关明确返回 400 拒绝
-该可选参数，只移除这个参数重试一次，仍由 envelope parser 强制 JSON 文件契约。
+和 `VERIFORGE_PROVIDER_REQUEST_JSON`：`openai_responses` 使用
+`reasoning.effort`/`max_output_tokens`，`anthropic_messages` 使用
+`output_config.effort`/`max_tokens`。任务 adapter 必须使用转换后的字段。
 
 生成包中的 `03-runner/isolation-manifest.yaml` 声明 fixture、只读和可写
 路径。runner 会在每个 roll 前后校验所有 read-only 路径、fixture、task spec
