@@ -1,0 +1,8 @@
+{
+  "summary": "共审阅 3 条记录：1 条通过，1 条驳回，1 条待补充材料",
+  "reviews": [
+    {"record_id": "R-001", "rationale_code": "approve", "evidence": "fixtures/records.json"},
+    {"record_id": "R-002", "rationale_code": "reject", "evidence": "fixtures/records.json"},
+    {"record_id": "R-003", "rationale_code": "needs_info", "evidence": "fixtures/records.json"}
+  ]
+}

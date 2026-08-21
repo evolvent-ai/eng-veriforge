@@ -1,0 +1,5 @@
+[
+  {"record_id": "R-001", "amount": 1200, "flag": "clean"},
+  {"record_id": "R-002", "amount": 98000, "flag": "threshold_exceeded"},
+  {"record_id": "R-003", "amount": 4500, "flag": "missing_receipt"}
+]
