@@ -65,6 +65,14 @@ class CanonicalMatrixTests(unittest.TestCase):
         self.assertEqual(models["kimi-k3"]["provider"], "moonshot")
         self.assertEqual(models["deepseek-v4-pro"]["provider"], "deepseek")
 
+    def test_canonical_matrix_declares_trace_capabilities(self):
+        models = {model["id"]: model for model in self.matrix["models"]}
+        self.assertEqual(models["qwen3.8-max"]["trace"]["mode"], "chat_tool_loop")
+        self.assertEqual(models["kimi-k3"]["trace"]["mode"], "chat_tool_loop")
+        self.assertEqual(models["deepseek-v4-pro"]["trace"]["mode"], "chat_tool_loop")
+        self.assertEqual(models["gpt-5.6-sol"]["trace"]["mode"], "native_cli_stream")
+        self.assertEqual(models["claude-opus-5"]["trace"]["mode"], "native_cli_stream")
+
     def test_mixed_provider_harness_matrix_is_accepted(self):
         catalog = RUNNER.load_harness_catalog(HARNESSES_PATH)
         self.assertEqual({entry["id"] for entry in catalog["harnesses"]}, {"cc", "codex"})
@@ -721,6 +729,45 @@ class CanonicalMatrixTests(unittest.TestCase):
             self.assertIn("item.started command_execution", terminal.getvalue())
             self.assertIn("<redacted>", terminal.getvalue())
             self.assertNotIn("secret-token", terminal.getvalue())
+
+    def test_trace_bundle_is_secret_redacted_and_indexed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trace_dir = Path(temp) / "trace"
+            paths = RUNNER.write_trace_bundle(
+                trace_dir,
+                stdout='{"type":"tool_call","input":"secret-token"}\n',
+                stderr='provider request secret-token\n',
+                credential="secret-token",
+                mode="native_cli_stream",
+                streaming=True,
+                tool_calls=True,
+                normalized_events=True,
+            )
+            index = json.loads(Path(paths["trace_index"]).read_text(encoding="utf-8"))
+            events = Path(paths["trace_events"]).read_text(encoding="utf-8")
+            self.assertEqual(index["trace_version"], "veriforge-trace/v1")
+            self.assertTrue(index["tool_calls_available"])
+            self.assertGreaterEqual(index["event_count"], 2)
+            self.assertNotIn("secret-token", events)
+            self.assertIn("<redacted>", events)
+
+    def test_chat_tool_loop_tools_are_path_restricted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fixtures = root / "fixtures"
+            outputs = root / "outputs"
+            fixtures.mkdir()
+            outputs.mkdir()
+            fixtures.joinpath("profile.json").write_text("{}\n", encoding="utf-8")
+            module_spec = importlib.util.spec_from_file_location("provider_trace_test", PROVIDER_AGENT_PATH)
+            module = importlib.util.module_from_spec(module_spec)
+            assert module_spec.loader is not None
+            module_spec.loader.exec_module(module)
+            self.assertEqual(module.execute_tool("list_fixtures", {}, fixtures, outputs), '["profile.json"]')
+            with self.assertRaises(ValueError):
+                module.execute_tool("read_fixture", {"path": "../outside"}, fixtures, outputs)
+            with self.assertRaises(ValueError):
+                module.execute_tool("unknown", {}, fixtures, outputs)
 
     def test_task_spec_modification_fails_before_scorer(self):
         with tempfile.TemporaryDirectory() as temp:

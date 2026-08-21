@@ -30,7 +30,8 @@ except ImportError as exc:  # pragma: no cover - exercised by preflight users
     raise SystemExit("PyYAML is required to read models.yaml") from exc
 
 
-RUNNER_VERSION = "veriforge-runner/v2.5"
+RUNNER_VERSION = "veriforge-runner/v2.6"
+TRACE_VERSION = "veriforge-trace/v1"
 SECRET_VALUE_PATTERN = re.compile(r"(?i)(api[_ -]?key|password|secret|cookie|access[_ -]?token)\s*[:=]\s*[^\s,;]+")
 PLACEHOLDER_MARKER = "REPLACE_WITH_"
 FIXED_PARAMETERS = {"reasoning_effort": "max", "max_output_tokens": 32768}
@@ -61,6 +62,12 @@ CANONICAL_MODELS = {
         "supported_harnesses": ["codex"],
         "codex_model_provider": "moonshot",
         "codex_base_url": "https://api.moonshot.cn/v1",
+        "trace": {
+            "mode": "chat_tool_loop",
+            "streaming": False,
+            "tool_calls": True,
+            "normalized_events": True,
+        },
     },
     "deepseek-v4-pro": {
         "provider": "deepseek",
@@ -72,6 +79,12 @@ CANONICAL_MODELS = {
         "supported_harnesses": ["codex"],
         "codex_model_provider": "deepseek",
         "codex_base_url": "https://api.deepseek.com",
+        "trace": {
+            "mode": "chat_tool_loop",
+            "streaming": False,
+            "tool_calls": True,
+            "normalized_events": True,
+        },
     },
     "qwen3.8-max": {
         "provider": "aliyun_maas",
@@ -83,6 +96,12 @@ CANONICAL_MODELS = {
         "supported_harnesses": ["codex"],
         "codex_model_provider": "aliyun_maas",
         "codex_base_url": "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "trace": {
+            "mode": "chat_tool_loop",
+            "streaming": False,
+            "tool_calls": True,
+            "normalized_events": True,
+        },
     },
     "claude-opus-5": {
         "provider": "wodex",
@@ -92,6 +111,12 @@ CANONICAL_MODELS = {
         "base_url": "https://api.wodex.ai",
         "credential_env": "WODEX_API_KEY",
         "supported_harnesses": ["cc"],
+        "trace": {
+            "mode": "native_cli_stream",
+            "streaming": True,
+            "tool_calls": True,
+            "normalized_events": True,
+        },
     },
     "gpt-5.6-sol": {
         "provider": "wodex",
@@ -103,6 +128,12 @@ CANONICAL_MODELS = {
         "supported_harnesses": ["codex"],
         "codex_model_provider": "wodex",
         "codex_base_url": "https://api.wodex.ai/v1",
+        "trace": {
+            "mode": "native_cli_stream",
+            "streaming": True,
+            "tool_calls": True,
+            "normalized_events": True,
+        },
     },
 }
 CANONICAL_MODEL_IDS = frozenset(CANONICAL_MODELS)
@@ -238,6 +269,14 @@ def load_catalog(path: Path) -> dict:
                 raise ValueError(f"model {model_id}.{field} must equal the canonical matrix value")
             if isinstance(value, str) and PLACEHOLDER_MARKER in value:
                 raise ValueError(f"model {model_id} still contains an organizer placeholder in {field}")
+        trace = model.get("trace")
+        if not isinstance(trace, dict):
+            raise ValueError(f"model {model_id} must declare a trace mapping")
+        if set(trace) != {"mode", "streaming", "tool_calls", "normalized_events"}:
+            raise ValueError(f"model {model_id}.trace has unexpected fields")
+        expected_trace = canonical["trace"]
+        if trace != expected_trace:
+            raise ValueError(f"model {model_id}.trace must match the canonical trace capability")
         supported_harnesses = model.get("supported_harnesses")
         if not isinstance(supported_harnesses, list) or not supported_harnesses:
             raise ValueError(f"model {model_id} must declare supported_harnesses")
@@ -783,6 +822,9 @@ def build_environment(
             "VERIFORGE_HARNESS_ID": str((harness or {}).get("id", "")),
             "VERIFORGE_HARNESS_PROTOCOL": str((harness or {}).get("protocol", "")),
             "VERIFORGE_API_BASE_URL": str(model.get("base_url", "")),
+            "VERIFORGE_TRACE_MODE": str((model.get("trace") or {}).get("mode", "native_cli_stream")),
+            "VERIFORGE_TRACE_STREAMING": json.dumps(bool((model.get("trace") or {}).get("streaming", False))),
+            "VERIFORGE_TRACE_TOOL_CALLS": json.dumps(bool((model.get("trace") or {}).get("tool_calls", False))),
         }
     )
     if workspace is not None:
@@ -796,6 +838,7 @@ def build_environment(
         env["VERIFORGE_OUTPUT_DIR"] = str(output_dir.resolve())
     if roll_dir is not None:
         env["VERIFORGE_ROLL_DIR"] = str(roll_dir.resolve())
+        env["VERIFORGE_TRACE_DIR"] = str((roll_dir / "trace").resolve())
     if fixtures_dir is not None:
         env["VERIFORGE_FIXTURES_DIR"] = str(fixtures_dir.resolve())
     if isolation_manifest is not None:
@@ -809,6 +852,96 @@ def redact_diagnostic(text: str, credential: str | None) -> str:
         text = text.replace(credential, "<redacted>")
     text = SECRET_VALUE_PATTERN.sub(lambda match: match.group(1) + "=<redacted>", text)
     return text.strip()[-2000:]
+
+
+def write_trace_bundle(
+    trace_dir: Path,
+    *,
+    stdout: str,
+    stderr: str,
+    credential: str | None,
+    mode: str,
+    streaming: bool,
+    tool_calls: bool,
+    normalized_events: bool,
+) -> dict[str, str]:
+    """Persist a uniform, secret-redacted trace bundle for one Agent run."""
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    raw_stdout = trace_dir / "raw-agent.stdout.log"
+    raw_stderr = trace_dir / "raw-agent.stderr.log"
+    events_path = trace_dir / "events.jsonl"
+    write_redacted_log(raw_stdout, stdout, credential)
+    write_redacted_log(raw_stderr, stderr, credential)
+    events: list[dict] = []
+    def scrub(value):
+        if isinstance(value, str):
+            return redact_text(value, credential)
+        if isinstance(value, dict):
+            return {key: scrub(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+    sequence = 0
+    for source, text in (("stdout", stdout), ("stderr", stderr)):
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            sequence += 1
+            redacted = redact_text(line, credential)
+            try:
+                payload = json.loads(line)
+                if isinstance(payload, dict):
+                    events.append({
+                        "seq": sequence,
+                        "source": source,
+                        "kind": "structured",
+                        "type": payload.get("type", "event"),
+                        "summary": _live_line(redacted),
+                        "payload": scrub(payload),
+                    })
+                    continue
+            except json.JSONDecodeError:
+                pass
+            events.append({
+                "seq": sequence,
+                "source": source,
+                "kind": "text",
+                "type": "diagnostic" if source == "stderr" else "text",
+                "summary": " ".join(redacted.split())[:2000],
+            })
+    if normalized_events:
+        events_path.write_text(
+            "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+            encoding="utf-8",
+        )
+    else:
+        events_path.write_text("", encoding="utf-8")
+    index = trace_dir / "index.json"
+    index.write_text(
+        json.dumps(
+            {
+                "trace_version": TRACE_VERSION,
+                "mode": mode,
+                "streaming": streaming,
+                "tool_calls_available": tool_calls,
+                "normalized_events": normalized_events,
+                "raw_stdout": str(raw_stdout),
+                "raw_stderr": str(raw_stderr),
+                "events": str(events_path),
+                "event_count": len(events),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "trace_index": str(index),
+        "trace_events": str(events_path),
+        "trace_raw_stdout": str(raw_stdout),
+        "trace_raw_stderr": str(raw_stderr),
+    }
 
 
 def infer_workspace_source(task_spec: Path) -> Path:
@@ -1140,6 +1273,7 @@ def run_roll(
     workspace = roll_dir / "workspace"
     output_dir = workspace / "outputs"
     logs_dir = roll_dir / "logs"
+    trace_dir = roll_dir / "trace"
     scorer_result_path = roll_dir / "scorer-result.json"
     roll_dir.mkdir(parents=True, exist_ok=False)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1233,6 +1367,9 @@ def run_roll(
         "task_spec": str(staged_spec),
         "output_dir": str(output_dir),
         "scorer_result": str(scorer_result_path),
+        "trace_mode": (model.get("trace") or {}).get("mode", "unknown"),
+        "trace_streaming": bool((model.get("trace") or {}).get("streaming", False)),
+        "trace_tool_calls_available": bool((model.get("trace") or {}).get("tool_calls", False)),
         "status": "dry_run" if args.dry_run else "pending",
     }
     step(2, "stage Agent workspace, fixtures, and trusted evaluation copy")
@@ -1277,6 +1414,23 @@ def run_roll(
 
     write_redacted_log(logs_dir / "agent.stdout.log", stdout, credential)
     write_redacted_log(logs_dir / "agent.stderr.log", stderr, credential)
+    trace_paths = write_trace_bundle(
+        trace_dir,
+        stdout=stdout,
+        stderr=stderr,
+        credential=credential,
+        mode=(model.get("trace") or {}).get("mode", "unknown"),
+        streaming=bool((model.get("trace") or {}).get("streaming", False)),
+        tool_calls=bool((model.get("trace") or {}).get("tool_calls", False)),
+        normalized_events=bool((model.get("trace") or {}).get("normalized_events", False)),
+    )
+    record.update(trace_paths)
+    if model.get("adapter") == "openai_chat":
+        provider_index = trace_dir / "index.json"
+        if provider_index.is_file():
+            record["trace_index"] = str(provider_index)
+            record["trace_events"] = str(trace_dir / "events.jsonl")
+    print(f"[veriforge] roll {index}/{args.rolls}: trace={trace_paths['trace_index']}", flush=True)
     record["agent_stdout_log"] = str(logs_dir / "agent.stdout.log")
     record["agent_stderr_log"] = str(logs_dir / "agent.stderr.log")
     record["returncode"] = returncode

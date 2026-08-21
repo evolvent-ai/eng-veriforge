@@ -37,6 +37,11 @@ models:
     base_url: "https://api.wodex.ai"
     credential_env: "WODEX_API_KEY"
     supported_harnesses: ["cc"]
+    trace:
+      mode: "native_cli_stream"
+      streaming: true
+      tool_calls: true
+      normalized_events: true
     profiles:
       - id: "default"
         parameters:
@@ -56,6 +61,11 @@ models:
     supported_harnesses: ["codex"]
     codex_model_provider: "wodex"
     codex_base_url: "https://api.wodex.ai/v1"
+    trace:
+      mode: "native_cli_stream"
+      streaming: true
+      tool_calls: true
+      normalized_events: true
     profiles:
       - id: "default"
         parameters:
@@ -75,6 +85,11 @@ models:
     supported_harnesses: ["codex"]
     codex_model_provider: "aliyun_maas"
     codex_base_url: "https://llm-fw3e7y0h6s1otsjx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    trace:
+      mode: "chat_tool_loop"
+      streaming: false
+      tool_calls: true
+      normalized_events: true
     profiles:
       - id: "default"
         parameters:
@@ -94,6 +109,11 @@ models:
     supported_harnesses: ["codex"]
     codex_model_provider: "moonshot"
     codex_base_url: "https://api.moonshot.cn/v1"
+    trace:
+      mode: "chat_tool_loop"
+      streaming: false
+      tool_calls: true
+      normalized_events: true
     profiles:
       - id: "default"
         parameters:
@@ -113,6 +133,11 @@ models:
     supported_harnesses: ["codex"]
     codex_model_provider: "deepseek"
     codex_base_url: "https://api.deepseek.com"
+    trace:
+      mode: "chat_tool_loop"
+      streaming: false
+      tool_calls: true
+      normalized_events: true
     profiles:
       - id: "default"
         parameters:

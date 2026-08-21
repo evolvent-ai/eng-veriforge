@@ -231,12 +231,18 @@ version, execution status, score, and output paths. It must also record unique
 paths for the roll workspace, output directory, stdout/stderr logs, and scorer
 result. It must not contain secret values or credential environment variable
 values.
+Each roll must also record `trace_mode`, `trace_index`, normalized trace event
+paths, and capability flags for streaming and tool calls. The trace index uses
+`veriforge-trace/v1`; it is the canonical post-roll entry point.
 
 During execution the participant terminal should show numbered roll steps,
 secret-redacted Agent stream output, scorer diagnostics/final score, and a
 periodic heartbeat when a child process is still running without output. The
 persisted stdout/stderr log files remain the complete audit records; terminal
 rendering is only a live progress view.
+After completion, the runner prints the trace index path. Native CLI streams and
+Chat tool loops expose normalized observable events; a Chat single-turn
+compatibility path must explicitly declare that tool-call tracing is unavailable.
 
 The canonical profile is translated before the Agent adapter runs. The built-in
 provider mappings are:

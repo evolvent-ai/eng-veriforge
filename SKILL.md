@@ -84,6 +84,12 @@ participant parameters, provider substitutions, or unresolved placeholders are
 allowed. The fixed profile parameters are exactly
 `reasoning_effort: max` and `max_output_tokens: 32768`; provider adapters map
 the normalized reasoning control to their native highest-effort setting.
+Each model MUST also declare a non-secret `trace` block with `mode`,
+`streaming`, `tool_calls`, and `normalized_events`. Native Claude/Codex CLI
+runs use `native_cli_stream`; Chat models use the bounded `chat_tool_loop` so
+fixture reads and output writes are observable through allowlisted local tools.
+The current Chat tool loop is multi-turn but non-SSE (`streaming: false`); the
+capability flag must describe actual wire behavior, not merely event capture.
 
 The participant workflow exposes harness selection, compatible model selection,
 rollout count, and one runtime API key. The runner MUST validate the exact
@@ -198,6 +204,11 @@ Rules:
   of the Agent workspace, executes scorer from a trusted per-roll evaluation
   copy, and hashes task, fixtures, scorer, allowlist, dependency, models, and
   isolation controls before and after each roll.
+- Every participant-facing package MUST implement `veriforge-trace/v1` and
+  expose `trace/index.json` plus normalized `trace/events.jsonl` for each roll.
+  The index must state whether streaming, tool calls, and raw provider output
+  are available. A one-shot Chat run must be labeled `chat_single_turn` and
+  explicitly report that tool-call tracing is unavailable.
 - Prefer deterministic validation; use human/model judging only when the
   rubric defines its input, version, variance policy, and fallback behavior.
 - Implement safety gates against structured claims and explicit positive
@@ -265,6 +276,13 @@ automatic approval option (`--approve-for-me`), which supplies the
 explicit `--sandbox` when that CLI version treats the options as mutually
 exclusive. A package without both executable harness adapters is incomplete.
 
+For Chat adapters, the default is a bounded `chat_tool_loop`. It may expose
+only `list_fixtures`, `read_fixture`, and `write_output`; every path is checked
+against the staged fixture root and the `outputs` allowlist. Each request,
+response, tool call, tool result, retry, and output write must be recorded in
+the provider trace. The loop must fail closed on unknown tools, path escapes,
+and a finite round limit. Streaming text alone is not a tool trace.
+
 Any string field that the scorer compares exactly (for example, rationale
 codes, statuses, or category labels) must have a closed codebook in `task.yaml`
 and in the Agent prompt. Do not leave exact-match vocabularies implicit in the
@@ -331,6 +349,12 @@ with no progress signal is not an acceptable runner UX.
 Task-specific adapters must propagate a non-zero Agent exit code and retain a
 bounded, secret-redacted diagnostic from both stdout and stderr; they must not
 redirect failures to `/dev/null`.
+
+After a roll, the runner must print the trace index path. Native CLI streams and
+Chat tool loops use normalized event types such as `provider_request`,
+`provider_response`, `tool_call`, `tool_result`, `file_write`, and
+`process_exit` where available. Hidden internal reasoning is not promised; the
+audit target is observable execution behavior.
 
 When `--harness` is omitted in an interactive run, prompt from `harnesses.yaml`
 first. Then, when `--model` is omitted, prompt from the canonical model entries
@@ -442,6 +466,9 @@ an execution result; the top-level `benchmark_status` is always the literal
   logs under each roll directory.
 - Test every provider adapter's canonical-to-native parameter mapping and
   record the resolved native request in the roll manifest.
+- Test trace index creation, secret redaction, normalized events, Chat
+  tool-loop path restrictions, unknown-tool rejection, finite round limits,
+  and explicit trace capability flags.
 - Test Chat Completions with a mock 503/connection close, malformed JSON,
   missing `choices/message/content`, successful JSON-mode output, and a 400
   JSON-mode rejection. Confirm retries are bounded and diagnostics are redacted.

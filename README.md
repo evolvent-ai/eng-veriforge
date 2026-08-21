@@ -120,6 +120,13 @@ runner 会为每个 roll 打印 `step 1/6` 到 `step 6/6` 的阶段进度，并�
 配置，不能加载参与者的全局 Codex 配置；CC harness 使用已批准的 Anthropic
 兼容配置和 `Read/Write/Edit/Glob/Grep` 文件工具白名单。
 
+每个 roll 还会生成 `trace/index.json` 和统一的 `trace/events.jsonl`，并在
+终端打印 trace index 路径。Claude/Codex 原生 CLI 使用
+`native_cli_stream`；Qwen、Kimi、DeepSeek 使用受限的 `chat_tool_loop`，只
+允许列出/读取 fixture 和写入 outputs。trace 记录请求、响应、工具调用、工具
+结果和文件写入；不会承诺或保存模型隐藏推理。模型矩阵中的 `trace` 能力字段
+描述实际 wire 行为，Chat tool loop 当前是多轮非 SSE 流式。
+
 每个 roll 都从干净的任务包 source 创建独立 workspace，并以该目录作为
 Agent 的 cwd。`02-evaluation/scorer.py`、`rubric.yaml`、`reference_answer/`
 和 `validators/` 不会进入 Agent workspace；runner 会在 workspace 外创建独立的
