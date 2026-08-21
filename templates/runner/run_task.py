@@ -1044,6 +1044,10 @@ def stage_evaluation_source(source: Path, evaluation_dir: Path) -> Path:
         ignore=lambda _path, names: {name for name in names if name in {"__pycache__", ".pytest_cache"}},
     )
     make_read_only(evaluation_dir)
+    # copytree may preserve an old source-directory mtime.  Refresh the
+    # per-roll root so diagnostics/tests that discover temporary copies cannot
+    # accidentally select a stale evaluation directory.
+    os.utime(evaluation_dir, None)
     return evaluation_dir
 
 
