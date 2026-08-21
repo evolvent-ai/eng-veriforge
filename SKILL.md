@@ -63,8 +63,8 @@ local-only 的任务，也要连同五个模型一起交付；本地烟测应从
 个，而不是创建单模型例外。
 
 canonical matrix 是混合 provider 的：Claude 和 GPT 走主办方的 Wodex 网关，
-Qwen 走主办方提供的阿里云 MaaS endpoint，Kimi 走 Moonshot，DeepSeek 走其官方
-endpoint。provider URL、凭据变量名和协议都属于主办方掌握的配置。参赛者只需
+Qwen 走主办方提供的阿里云 MaaS 实例，Kimi 走 Moonshot，DeepSeek 走其官方
+endpoint。除 GPT 外全部使用各自的 Anthropic 兼容接口。provider URL、凭据变量名和协议都属于主办方掌握的配置。参赛者只需
 为所选模型输入一次隐藏的 API Key，永远不需要选择或配置 provider 和 endpoint。
 
 **协议决定模型能上哪个 harness。**Codex CLI 只接受 Responses 协议（其
@@ -73,14 +73,22 @@ endpoint。provider URL、凭据变量名和协议都属于主办方掌握的配
 
 | harness | 协议 | 模型 |
 | --- | --- | --- |
-| `cc` | `anthropic_messages` | `claude-opus-5`、`kimi-k3` |
-| `codex` | `openai_responses` | `gpt-5.6-sol`、`qwen3.8-max`、`deepseek-v4-pro` |
+| `cc` | `anthropic_messages` | `claude-opus-5`、`kimi-k3`、`qwen3.8-max`、`deepseek-v4-pro` |
+| `codex` | `openai_responses` | `gpt-5.6-sol` |
 
-`kimi-k3` 是其中的例外：Moonshot 的 OpenAI 端点只有 Chat Completions，接到
-Codex 上会 404，因此它走 Moonshot 官方的 Anthropic 兼容端点
-`https://api.moonshot.cn/anthropic`，只支持 CC。该端点上的模型 ID 是
-`kimi-k3[1m]`，与 OpenAI 端点的 `kimi-k3` 不同。这样可以完全避免引入本地协议
-转换层。
+除 `gpt-5.6-sol` 外的四个模型都走各自 provider 的 Anthropic 兼容端点，因此只支
+持 CC。这样可以完全避免引入本地协议转换层。各端点的差异：
+
+| 模型 | Anthropic 端点 | 端点上的模型 ID |
+| --- | --- | --- |
+| `claude-opus-5` | Wodex 网关 | `claude-opus-5` |
+| `kimi-k3` | `api.moonshot.cn/anthropic` | `kimi-k3[1m]` |
+| `deepseek-v4-pro` | `api.deepseek.com/anthropic` | `deepseek-v4-pro[1m]` |
+| `qwen3.8-max` | MaaS 实例的 `/apps/anthropic` | `qwen3.8-max` |
+
+注意两点：Kimi 和 DeepSeek 在 Anthropic 端点上的模型 ID 带 `[1m]` 后缀，与
+OpenAI 端点的 ID 不同；Qwen 的路径是 `/apps/anthropic` 且**不能以 `/v1` 结
+尾**，否则 CC 做模型发现时会拼出 `/v1/v1/models` 而 404。
 
 新增或替换模型时，`adapter` 必须与其 `supported_harnesses` 匹配，否则运行时
 必然握手失败。
@@ -98,10 +106,10 @@ Codex 上会 404，因此它走 Moonshot 官方的 Anthropic 兼容端点
 
 每个模型还必须声明一个非敏感的 `trace` 块，包含 `mode`、`streaming`、
 `tool_calls` 和 `normalized_events`。走 Claude/Codex CLI 的模型使用
-`native_cli_stream`；直连 Chat 的模型使用有界的 `chat_tool_loop`，让 fixture 读
-取和输出写入能通过 allowlist 内的本地工具被观测到。能力标志必须描述真实的传输
-行为，而不只是事件采集能力——例如当前的 Chat tool loop 是多轮但非 SSE 的，因此
-`streaming: false`。
+`native_cli_stream`——当前矩阵的五个模型都属于这一类。`chat_tool_loop` 保留给不
+经 CLI 的遗留直连 adapter，它用有界的工具循环让 fixture 读取和输出写入可被观
+测。能力标志必须描述真实的传输行为，而不只是事件采集能力——例如 Chat tool loop
+是多轮但非 SSE 的，因此 `streaming: false`。
 
 参赛者工作流只暴露 harness 选择、兼容模型选择、rollout 次数和一次运行时 API
 Key。runner 在接受任务包之前，必须校验 canonical 模型 ID 集合完全一致、
@@ -310,8 +318,9 @@ python 03-runner/run_task.py --interactive --rolls N
 ```
 
 shell 包装脚本是参赛者的工作流。它必须在任意当前目录下都能工作，在开始前打印
-harness -> 兼容模型 -> API Key -> rollout 这四步流程，并且在参赛者未通过第一
-个参数指定其他允许次数时，默认运行三次 roll。Python 命令属于进阶／CI 接口，不
+harness -> 兼容模型 -> rollout 次数 -> API Key 这四步流程，并且在参赛者未通过第一
+个参数指定次数时，交互式提示 rollout 次数并以 `roll_policy.default_rolls` 为默
+认值。Python 命令属于进阶／CI 接口，不
 是生成的 README 的主要说明。
 
 如果某个任务在开发者模式下暴露了 adapter 命令，下面两种写法都合法，且行为必须
@@ -398,7 +407,7 @@ runner 只能转发 `CODEX_BIN` 和 `CLAUDE_BIN` 这两个具名的非敏感可�
 
 ```text
 任务构思 -> 题目／评测包 -> 选择 CC 或 Codex -> 选择一个兼容模型
-  -> 输入一次 API Key -> 选择 N 次 roll -> 调用所选 harness
+  -> 选择 N 次 roll -> 输入一次 API Key -> 调用所选 harness
   -> 校验并对每次 roll 评分
   -> 查看失败证据 -> 改进 benchmark
 ```

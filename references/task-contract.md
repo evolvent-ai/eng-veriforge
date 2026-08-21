@@ -278,7 +278,7 @@ models:
     profiles:
       - id: "default"
         parameters: {}
-        timeout_seconds: 1800
+        timeout_seconds: 7200
         retries: 0
 
 roll_policy:
@@ -287,6 +287,36 @@ roll_policy:
   max_rolls: 10
   max_parallelism: 2
 ```
+
+### 上下文窗口与重试
+
+这两项不在 `models.yaml` 中声明，由 runner 统一固定后下发给 harness：
+
+| 项 | 取值 | Codex（config.toml） | CC（环境变量） |
+| --- | --- | --- | --- |
+| 上下文窗口 | `1000000` | `model_context_window` | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` |
+| 自动压缩阈值 | `900000` | `model_auto_compact_token_limit` | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` |
+| HTTP 请求重试 | `4` | `request_max_retries` | 无对应变量 |
+| SSE 断流重试 | `5` | `stream_max_retries` | 无对应变量 |
+
+**上下文窗口必须显式声明。**CC 对无法识别的模型默认只按 200K 计算，因此不带
+`[1m]` 后缀的第三方模型（例如 `qwen3.8-max`）会被砍到实际能力的 1/5 并提前触发
+压缩——这会让跨模型分数失去可比性。runner 通过
+`VERIFORGE_CONTEXT_WINDOW` 和 `VERIFORGE_AUTO_COMPACT_LIMIT` 把统一值传给两个
+adapter，adapter 缺少这两个变量时必须 fail closed。
+
+**重试同样显式写死。**Codex 的 `request_max_retries` 和 `stream_max_retries` 有
+CLI 默认值，但默认值会随版本变化，会让不同机器上的容错能力不一致。CC 侧没有等
+价的重试变量，只有 `API_TIMEOUT_MS`，因此两个 harness 的 HTTP 层容错本身就不对
+等——这是已知限制。
+
+### 超时
+
+`timeout_seconds` 是单次 Agent 运行的上限，当前活动基线为 `7200`（2 小时）。它
+不在锁定参数范围内，可按机器性能调整，但同一场活动必须五个模型一致，否则分数不
+可比。scorer 使用独立的 `SCORER_TIMEOUT_SECONDS`（300 秒），不随 Agent 超时放
+大——确定性校验通常几秒内完成，复用长超时会让死循环的 scorer 拖满整个 Agent 超时
+才被发现。
 
 `display_name` 是面向参赛者的展示文本；`model_name` 是发送给 provider 的
 canonical ID。参赛者每次运行恰好选择一个模型。runner 会自动为该模型使用
@@ -302,10 +332,14 @@ canonical ID。参赛者每次运行恰好选择一个模型。runner 会自动�
 ./03-runner/run_benchmark.sh
 ```
 
-该包装脚本会切换到包根目录、说明流程，先提示选择 `cc`（Claude Code）或
-`codex`，再提示选择一个兼容的 canonical 模型，用隐藏输入索取一次所选模型的 API
-Key，然后运行默认次数的 rollout。可选的第一个参数用于修改 rollout 次数。直接
-使用 Python 参数属于进阶／CI 接口。如果没有指定结果目录，runner 会创建
+该包装脚本会切换到包根目录、说明流程，依次提示：选择 `cc`（Claude Code）或
+`codex`、选择一个兼容的 canonical 模型、选择 rollout 次数、用隐藏输入索取一次所
+选模型的 API Key，然后执行 rollout。
+
+rollout 次数的提示以 `roll_policy.default_rolls` 为默认值（直接回车即采用），取
+值必须落在 `min_rolls` 到 `max_rolls` 之间，越界或非法输入会重新提问。给包装脚
+本传第一个参数、或给 Python 命令传 `--rolls` 都会跳过该提问，用于 CI 等非交互场
+景。直接使用 Python 参数属于进阶／CI 接口。如果没有指定结果目录，runner 会创建
 `results/<model-id>-<高精度 UTC 时间戳>/`，确保重复运行不会复用之前的 roll
 workspace。
 
@@ -332,8 +366,8 @@ canonical ID 集合恰好是
 余或被替换的 ID 都是非法的。runner 还会拒绝 `REPLACE_WITH_*` 占位值、与
 `examples/activity-models.yaml` 不一致的 provider/adapter/endpoint/凭据映射，以
 及参赛者的 profile 或参数覆盖。活动的凭据模式固定为 `per_selected_model`。
-Claude 和 GPT 走 Wodex，Qwen 走主办方提供的阿里云 MaaS endpoint，Kimi 走
-Moonshot，DeepSeek 走其官方 endpoint。这个锁定属于任务包层面的策略；赛事分发方
+Claude 和 GPT 走 Wodex，Qwen 走主办方提供的阿里云 MaaS 实例，Kimi 走
+Moonshot，DeepSeek 走其官方 endpoint；除 GPT 外全部使用 Anthropic 兼容接口。这个锁定属于任务包层面的策略；赛事分发方
 还应发布产物校验和，或以其他方式防止参赛者在分发后修改 `models.yaml`。
 
 ### 协议与 harness 的对应
@@ -342,19 +376,25 @@ Codex CLI 只接受 Responses 协议（`wire_api` 的唯一合法值是 `respons
 接受 Anthropic Messages 协议。因此模型的 `adapter` 必须与其
 `supported_harnesses` 匹配：
 
-| 模型 | provider | adapter | endpoint | harness |
-| --- | --- | --- | --- | --- |
-| `claude-opus-5` | Wodex | `anthropic_messages` | `messages` | `cc` |
-| `kimi-k3` | Moonshot | `anthropic_messages` | `messages` | `cc` |
-| `gpt-5.6-sol` | Wodex | `openai_responses` | `responses` | `codex` |
-| `qwen3.8-max` | 阿里云 MaaS | `openai_responses` | `responses` | `codex` |
-| `deepseek-v4-pro` | DeepSeek | `openai_responses` | `responses` | `codex` |
+| 模型 | provider | adapter | base_url | model_name | harness |
+| --- | --- | --- | --- | --- | --- |
+| `claude-opus-5` | Wodex | `anthropic_messages` | `api.wodex.ai` | `claude-opus-5` | `cc` |
+| `kimi-k3` | Moonshot | `anthropic_messages` | `api.moonshot.cn/anthropic` | `kimi-k3[1m]` | `cc` |
+| `deepseek-v4-pro` | DeepSeek | `anthropic_messages` | `api.deepseek.com/anthropic` | `deepseek-v4-pro[1m]` | `cc` |
+| `qwen3.8-max` | 阿里云 MaaS | `anthropic_messages` | MaaS 实例 `/apps/anthropic` | `qwen3.8-max` | `cc` |
+| `gpt-5.6-sol` | Wodex | `openai_responses` | `api.wodex.ai/v1` | `gpt-5.6-sol` | `codex` |
 
-`kimi-k3` 是例外：Moonshot 的 OpenAI 端点只提供 Chat Completions，接到 Codex 上
-会 404，因此它使用 Moonshot 官方的 Anthropic 兼容端点
-`https://api.moonshot.cn/anthropic`，只支持 CC。**该端点上的模型 ID 是
-`kimi-k3[1m]`**，与 OpenAI 端点的 `kimi-k3` 不同；矩阵条目的 `id` 仍是
-`kimi-k3`，`model_name` 才是 `kimi-k3[1m]`。这样无需引入任何本地协议转换层。
+只有 `gpt-5.6-sol` 走 Codex；其余四个模型都使用各自 provider 的 Anthropic 兼容
+端点，因此只支持 CC。这样无需引入任何本地协议转换层。
+
+两个容易出错的细节：
+
+- **模型 ID 不等于矩阵条目 ID。**Kimi 和 DeepSeek 在 Anthropic 端点上的 ID 带
+  `[1m]` 后缀（`kimi-k3[1m]`、`deepseek-v4-pro[1m]`），与它们 OpenAI 端点的 ID
+  不同。矩阵条目的 `id` 保持不带后缀，`model_name` 才是实际发给 provider 的值。
+- **Qwen 的路径是 `/apps/anthropic`，且不能以 `/v1` 结尾。**CC 会自动追加
+  `/v1/models` 做模型发现，若 base_url 以 `/v1` 结尾会拼出 `/v1/v1/models` 而
+  404。
 
 CC harness 在连接第三方 Anthropic 端点时，还必须把
 `ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、
@@ -411,6 +451,71 @@ workspace，把 scorer/标答/rubric/validator 等资产挡在该 workspace 之�
 任何对受保护控制文件的改动，或对 `mutable_paths` 之外任何 workspace 路径的改
 动，都会在评分之前判定该次 roll 失败。`read_only_paths` 和 `mutable_paths` 由本
 地兜底逻辑通过前后完整性检查来强制执行；沙箱后端还可以额外以挂载方式强制执行。
+
+## 隔离机制
+
+隔离是纯文件层实现的，不依赖容器或 OS 沙箱，三平台行为一致。共六道：
+
+| # | 机制 | 防的是什么 |
+| --- | --- | --- |
+| 1 | 暂存时排除 `02-evaluation/`，只单独拷回 fixture | Agent 读 scorer、标答、rubric |
+| 2 | 任务定义文件去掉写权限 | 误触改契约 |
+| 3 | 每次 roll 前后对 9 个控制文件和整个 workspace 做哈希 | 故意改契约、改 fixture、写越界路径 |
+| 4 | scorer 在 workspace 之外的随机临时目录执行 | 定位并篡改评分逻辑 |
+| 5 | **拒绝输出目录中的符号链接** | 把输出软链到 workspace 外绕过约束 |
+| 6 | scorer 的 stdout 是唯一权威结果 | 预写评分结果文件 |
+
+第 3 道的哈希覆盖路径名、类型、**权限位**、内容和符号链接目标，因此「先 chmod
+回来再改」同样会被发现。
+
+第 5 道是必需的：`outputs/` 属于 `mutable_paths`，被完整性哈希跳过，里面的符号
+链接不受任何约束。Agent 可以把 `result.json` 软链到 workspace 外的文件，让
+scorer 读到不受约束的内容并拿到分数。规则是**一律拒绝符号链接，不区分指向内
+外**——benchmark 的输出是 JSON/Markdown，用不到符号链接。runner 在评分前拦一
+次，scorer 骨架读取时再拦一次。
+
+### harness 侧的路径约束
+
+除上述六道外，两个 harness 各自还有配置层约束：
+
+**CC** —— runner 在暂存时生成 `.claude/settings.json`：
+
+```json
+{"permissions": {"deny": ["Read(//**)", "Write(//**)", "Edit(//**)"]}}
+```
+
+`//` 前缀表示文件系统根开始的绝对路径。匹配顺序是 deny → ask → allow，且**项目
+级 deny 无法被 allow 覆盖**，Agent 无法自行放宽。CC 的工具白名单里没有 Bash，
+五个文件工具全部受此约束，因此这一层能真正锁死 CC 侧的越界读写。该文件计入
+workspace 哈希，改动它会在评分前被判失败。
+
+**Codex** —— 在 `config.toml` 中声明：
+
+```toml
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+
+[sandbox_workspace_write]
+writable_roots = []
+exclude_slash_tmp = true
+exclude_tmpdir_env_var = true
+network_access = false
+```
+
+`approval_policy = "never"` 是其中唯一不依赖 Landlock 的一项：自动批准会把沙箱
+拦下的命令放行到沙箱外重试，等于留了逃生路。注意不能同时传命令行的
+`--approve-for-me`，它的优先级高于 config.toml，会覆盖该策略。
+
+### 已知限制
+
+**Codex 在 Landlock 不可用的机器上，越界读写拦不住。**Codex 天然具备执行命令的
+能力，`sandbox_mode` 依赖 Linux 的 Landlock（内核 5.13+）、macOS 的 Seatbelt 或
+Windows 的受限令牌。内核不满足要求时，已知会**静默禁用沙箱且不给警告**
+（openai/codex#6665）。因此在这类机器上，上表第 3 道的事后哈希检测是实际生效的
+兜底，而不是事前阻止。
+
+这是刻意的取舍：事后检测能保证「作弊必被发现、分数不可信的 roll 一定失败」，对
+benchmark 而言已经足够；事前阻止需要容器或沙箱，会牺牲跨平台一致性和交付体验。
 
 ## 运行清单
 

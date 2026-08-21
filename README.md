@@ -32,8 +32,7 @@ python3 scripts/new_task.py my-task --output-dir ~/benchmarks --title "我的任
 | `02-evaluation/rubric.yaml` + `scorer.py` | 对齐维度、权重、通过线 |
 | `03-runner/cc_agent.sh` + `codex_agent.sh` | 在 prompt 中复述输出契约 |
 
-改完后按 `references/task-contract.md` 的「一致性锚点」逐项核对，并跑四个
-scorer 用例（标答满分 / 替代 key 低分 / fatal 违规不通过 / 输出缺失 0 分）。
+完整示例见下面的「跑通一个完整任务」。
 
 ### 第 3 步：交给参赛者运行
 
@@ -45,7 +44,8 @@ cd ~/benchmarks/my-task
 ```
 
 脚本会依次让参赛者选择 harness（Claude Code 或 Codex）、选择兼容模型、隐藏
-输入该模型的 API Key，然后默认自动执行 3 次隔离 rollout 和评分。每次运行使用新的
+选择 rollout 次数（直接回车用默认的 3 次），最后输入该模型的 API Key，然后自动
+执行隔离 rollout 和评分。每次运行使用新的
 `results/<model>-<timestamp>/` 目录，不需要配置 provider、adapter、scorer、
 workspace 或输出路径。
 
@@ -54,6 +54,192 @@ workspace 或输出路径。
 ```bash
 python3 03-runner/run_task.py --preflight
 ```
+
+## 跑通一个完整任务
+
+下面用「报销单审阅」这个例子走完全流程。所有命令和输出都可以直接照做。
+
+### 1. 生成骨架
+
+```bash
+cd /path/to/eng-veriforge
+python3 scripts/new_task.py expense-review --output-dir ~/benchmarks --title "报销单审阅"
+cd ~/benchmarks/expense-review
+```
+
+### 2. 写输入数据
+
+替换 `02-evaluation/fixtures/records.json`：
+
+```json
+[
+  {"record_id": "E-001", "amount": 320,   "category": "交通", "receipt": true,  "submitted_days_ago": 3},
+  {"record_id": "E-002", "amount": 12800, "category": "设备", "receipt": true,  "submitted_days_ago": 5},
+  {"record_id": "E-003", "amount": 780,   "category": "餐饮", "receipt": false, "submitted_days_ago": 2},
+  {"record_id": "E-004", "amount": 150,   "category": "交通", "receipt": true,  "submitted_days_ago": 95}
+]
+```
+
+fixture 必须是去标识化数据，不能含真实姓名、账号或凭据。
+
+### 3. 写题干和判定规则
+
+改 `01-task/task.yaml` 的 `objective` 和 `agent_instructions`：
+
+```yaml
+objective: "按公司报销规则审阅每条报销单，给出通过/驳回/待补充的判定"
+
+agent_instructions: |
+  读取 fixtures/records.json 中的全部报销单，按下列规则逐条判定，
+  把结果写入 outputs/result.json。只使用 fixture 中的数据，不要编造记录。
+
+  判定规则（按顺序匹配，命中即停）：
+  1. submitted_days_ago > 90        -> reject      （超过报销时效）
+  2. receipt 为 false               -> needs_info  （缺少发票）
+  3. amount > 10000                 -> needs_info  （超过审批限额，需上级复核）
+  4. 其余                            -> approve
+```
+
+**规则必须写死在题干里。**如果判定标准只存在于标答中，等于让 Agent 猜评测约
+定，测的就不是任务能力了。同理，`codebooks` 里的枚举值（`approve` /
+`reject` / `needs_info`）也必须公开声明。
+
+### 4. 写标答
+
+`02-evaluation/reference_answer/result.json` 就是「一份满分的 Agent 输出」，
+结构必须与 `task.yaml.required_output` 完全一致：
+
+```json
+{
+  "summary": "共审阅 4 条报销单：1 条通过，1 条驳回，2 条待补充材料",
+  "reviews": [
+    {"record_id": "E-001", "rationale_code": "approve",    "evidence": "fixtures/records.json"},
+    {"record_id": "E-002", "rationale_code": "needs_info", "evidence": "fixtures/records.json"},
+    {"record_id": "E-003", "rationale_code": "needs_info", "evidence": "fixtures/records.json"},
+    {"record_id": "E-004", "rationale_code": "reject",     "evidence": "fixtures/records.json"}
+  ]
+}
+```
+
+按上面的规则逐条核对：E-001 全合规通过；E-002 金额 12800 超限额；E-003 无发
+票；E-004 已过 95 天超时效。
+
+### 5. 调整判定逻辑（可选）
+
+骨架自带的三个 validator 已经能处理这个例子。如果你的任务字段名或判定方式不
+同，改 `02-evaluation/validators/` 下的三个模块，**保留函数签名不变**：
+
+| 模块 | 签名 | 返回 |
+| --- | --- | --- |
+| `check_schema.py` | `check_schema(payload)` | `(bool, str)` |
+| `check_correctness.py` | `check_correctness(payload, reference)` | `(float, str)` 比例 0.0–1.0 |
+| `check_safety.py` | `check_safety(payload)` | `(bool, str)` fatal 维度 |
+
+字段名常量必须与 `task.yaml` 一字不差。
+
+### 6. 跑四个 scorer 用例
+
+这一步验证 scorer 有判别力，而不是无脑给分：
+
+```bash
+cd 02-evaluation
+mkdir -p /tmp/o/{good,badkey,unsafe,missing}
+cp reference_answer/result.json /tmp/o/good/
+echo '{"summary":"x","requests":[{"id":"E-001","reason":"approve"}]}' > /tmp/o/badkey/result.json
+python3 -c "
+import json; d=json.load(open('reference_answer/result.json'))
+d['reviews'][0]['evidence']='https://example.com/leak'
+json.dump(d, open('/tmp/o/unsafe/result.json','w'), ensure_ascii=False)"
+
+for c in good badkey unsafe missing; do
+  printf '%-8s ' "$c"
+  VERIFORGE_OUTPUT_DIR=/tmp/o/$c python3 scorer.py
+done
+cd ..
+```
+
+期望结果：
+
+| 用例 | 得分 | passed | 说明 |
+| --- | --- | --- | --- |
+| `good`（标答） | 100.0 | `true` | scorer 认得对的答案 |
+| `badkey`（替代 key） | 15.0 | `false` | 诊断精确指出缺失字段 |
+| `unsafe`（证据造假） | 85.0 | `false` | **分数高于通过线但 fatal 维度归零** |
+| `missing`（无输出） | 0 | `false` | scorer 仍输出合法 JSON 并以 0 退出 |
+
+第三行是关键：85 分却不通过，这正是 fatal 维度该有的行为。如果四个用例的结果
+不是这样，说明 scorer 或 validator 有问题，先修再往下走。
+
+### 7. 核对一致性锚点
+
+同一份契约在多个文件里被复述，以下取值必须逐字一致：
+
+```bash
+grep -rn '^task_id:' 01-task 02-evaluation 03-runner   # 应全部相同
+```
+
+完整的 8 项锚点见 `references/task-contract.md` 的「一致性锚点」表，
+包括输出路径、字段名、枚举词表、维度权重、通过线、fatal 维度等。
+
+### 8. 预检
+
+```bash
+python3 03-runner/run_task.py --preflight
+```
+
+输出示例：
+
+```text
+cc：harness 可用（claude）
+codex：harness 可用（codex）
+claude-opus-5：凭据 缺失（WODEX_API_KEY）
+...
+```
+
+凭据「缺失」不是错误——运行时会用隐藏输入提示录入。但 harness「缺失」需要先装
+对应的 CLI。
+
+### 9. 正式运行
+
+```bash
+./03-runner/run_benchmark.sh
+```
+
+依次选 harness、选模型、选 rollout 次数（1–10，直接回车用默认的 3 次），最后输入
+该模型的 API Key。
+
+也可以用参数直接指定次数、跳过第 3 步的提问：
+
+```bash
+./03-runner/run_benchmark.sh 5
+```
+
+每次 roll 打印 6 步进度，结束时给出：
+
+```text
+[veriforge] 第 1/2 次 roll：得分=100.0 状态=passed
+[veriforge] 第 2/2 次 roll：得分=100.0 状态=passed
+[veriforge] 完成：2 次 roll 中通过 2 次
+[veriforge] 运行清单: results/claude-opus-5-<时间戳>/run-manifest.json
+```
+
+### 10. 查看结果
+
+```text
+results/<model>-<时间戳>/
+├── run-manifest.json          汇总：模型、分数、哈希、trace 元数据
+├── roll-1/
+│   ├── scorer-result.json     逐维度得分与诊断
+│   ├── workspace/             该次 roll 的独立工作目录
+│   │   └── outputs/           Agent 的产出（唯一可写位置）
+│   ├── logs/                  脱敏后的 stdout/stderr
+│   ├── trace/                 归一化事件流（veriforge-trace/v1）
+│   └── home/ config/ cache/   roll 私有的环境目录
+└── roll-2/                    完全独立，不受 roll-1 影响
+```
+
+失败时先看 `roll-N/scorer-result.json` 的 `dimensions[].detail`，它会指出具体
+是哪个字段、哪条记录出的问题。
 
 ## 作为 Claude Code Skill 使用
 
@@ -112,12 +298,11 @@ Messages 协议：
 
 | harness | 模型 |
 | --- | --- |
-| Claude Code (CC) | `claude-opus-5`、`kimi-k3` |
-| Codex CLI | `gpt-5.6-sol`、`qwen3.8-max`、`deepseek-v4-pro` |
+| Claude Code (CC) | `claude-opus-5`、`kimi-k3`、`qwen3.8-max`、`deepseek-v4-pro` |
+| Codex CLI | `gpt-5.6-sol` |
 
-`kimi-k3` 走 Moonshot 官方的 Anthropic 兼容端点，所以只支持 CC——Moonshot 的
-OpenAI 端点只有 Chat Completions，接到 Codex 上会 404。这样不需要引入任何本地
-协议转换层（如 CC Switch）。
+除 `gpt-5.6-sol` 外的四个模型都走各自 provider 的 Anthropic 兼容端点，所以只支
+持 CC。这样不需要引入任何本地协议转换层（如 CC Switch）。
 
 参赛者拿到任务包后不需要填写 provider、endpoint、模型 ID 或任何超参，先选择
 CC 或 Codex，再从该 harness 的兼容模型中选择一个，在运行时输入一次所选模型
